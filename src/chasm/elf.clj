@@ -123,34 +123,11 @@
    (bsplit offset    8) (bsplit size      8) (bsplit link  4) (bsplit info 4)
    (bsplit addralign 8) (bsplit entsize   8)))
 
-(+ 64 (* 56 3))
-
-(def program-header
-  "An executable or shared object file's program header table is an array of
-   structures, each describing a segment or other information the system needs
-   to prepare the program for execution. An object file segment contains one or
-   more sections."
-  [(program-header-entry
-    :type   PT_LOAD    :flags (+ PF_X PF_R)
-    :vaddr  0x400000   :paddr 0x400000
-    :offset 0x00       :align 0x200000
-    :filesz 0x010a     :memsz 0x010a)
-   (program-header-entry
-    :type   PT_LOAD    :flags (+ PF_W PF_R)
-    :vaddr  0x60010a   :paddr 0x60010a
-    :offset 0x010a     :align 0x200000
-    :filesz 0x0e       :memsz 0x0e)
-   (program-header-entry
-    :type   0x65041580 :flags 0x2800
-    :vaddr  0x00       :paddr 0x00
-    :offset 0x00       :align 0x08
-    :filesz 0x00       :memsz 0x00)])
-
 (def program-instructions
-  [0xba  0x0e 0x00 0x00 0x00
+  [0xba  0x0e 0x00 0x00 0x00 ;; 0x0000000e
    ;; movl %edx len 14
-   0xb9  0x0a 0x01 0x60 0x00
-   ;; movl %ecx ptr to Hello, world!\n
+   0xb9  0x0a 0x01 0x60 0x00 ;; 0x0060010a <- so we have to know the ptr address
+   ;; movl %ecx ptr to Hello, world!\n        but it's unknown until alloc'd
    0xbb  0x01 0x00 0x00 0x00
    ;; movl %ebx 1 stdout
    0xb8  0x04 0x00 0x00 0x00
@@ -161,51 +138,126 @@
    ;; movl %ebx 0
    0xb8  0x01 0x00 0x00 0x00
    ;; movl %eax 1
-   0xcd  0x80])
+   0xcd  0x80
+   ])
 ;; int 0x80 call kernel
 
 (def hello-world-bytes
-  (map byte "Hello, World!\nTest\n"))
+  (map byte "Hello, World!\n"))
 
-(def program
-  [program-instructions hello-world-bytes])
+(defn program [instructions data]
+  "An executable or shared object file's program header table is an array of
+   structures, each describing a segment or other information the system needs
+   to prepare the program for execution. An object file segment contains one or
+   more sections."
+  (let [file-header-size e-ehsize
+        prog-hdr-offset  e-phoff
+        prog-hdr-count   3 ; instructions + data + end
+        prog-hdr-size    56
+        instructs-count  (count instructions)
+        filesz-1         (+ e-ehsize (* 3 56) instructs-count)
+        filesz-2         (count data)
+        program          (concat instructions data)]
+    {:header [(program-header-entry
+               :type   PT_LOAD    :flags (+ PF_X PF_R) ;;; this tells the start of program
+               :vaddr  0x400000   :paddr 0x400000
+               :offset 0x00       :align 0x200000
+               :filesz filesz-1   :memsz filesz-1) ;;; 266, why?
+              (program-header-entry ;;; this tells where the text is
+               :type   PT_LOAD    :flags (+ PF_W PF_R)
+               :vaddr  0x60010a   :paddr 0x60010a ; address where text starts
+               :offset 0x010a     :align 0x200000 ; could/should this be decided
+               :filesz filesz-2   :memsz filesz-2) ; by the complier - yes?
+              (program-header-entry ;;; dunno what this is for
+               :type   0x65041580 :flags 0x2800
+               :vaddr  0x00       :paddr 0x00
+               :offset 0x00       :align 0x08
+               :filesz 0x00       :memsz 0x00)]
+     :program {:bytes program :size (count program)}}))
+
+(defn file-header-meta
+  [program-header program-size section-header section-names-idx]
+  (let [e-phentsize (count (first program-header))
+        e-phnum     (count program-header)
+        e-shnum     (count section-header)]
+    {:e-ident     (->> e-ident (partition 2) (mapcat second))
+     :e-phentsize e-phentsize ; a program header table entry size
+     :e-phnum     e-phnum         ; number of entries in ^^
+     :e-shentsize (count (first section-header)) ; a section header table entry size
+     :e-shnum     e-shnum         ; number of entries in ^^
+     :e-shstrndx  (bsplit section-names-idx 2)
+     ;; ^^ index of the section header table entry that contains the section names
+     :e-shoff     (if (zero? e-shnum)
+                    0
+                    (-> e-phoff ; section header offset, after program data
+                        (+ (* e-phnum e-phentsize))
+                        (+ program-size)))}))
 
 (defn file-header
-  [program-header program-size section-header section-names-idx]
-  (let [ident       (->> e-ident (partition 2) (mapcat second))
-        e-phentsize (count (first program-header)) ; a program header table entry size
-        e-phnum     (count program-header) ; number of entries in ^^
-        e-shentsize (count (first section-header)) ; a section header table entry size
-        e-shnum     (count section-header) ; number of entries in ^^
-        e-shstrndx  (bsplit section-names-idx 2)
-        ;; ^^ index of the section header table entry that contains the section names
-        e-shoff     (if (zero? e-shnum)
-                      0
-                      (-> e-phoff ; section header offset, after program data
-                          (+ (* e-phnum e-phentsize))
-                          (+ program-size)))]
-    [ident
-     (bsplit e-type  2) (bsplit e-machine   2) (bsplit e-version   4)
-     (bsplit e-entry 8) (bsplit e-phoff     8) (bsplit e-shoff     8)
-     (bsplit e-flags 4) (bsplit e-ehsize    2) (bsplit e-phentsize 2)
-     (bsplit e-phnum 2) (bsplit e-shentsize 2) (bsplit e-shnum     2)
-     e-shstrndx]))
+  [{:keys [e-ident e-phentsize e-phnum e-shentsize e-shnum e-shstrndx e-shoff]}]
+  [e-ident
+   (bsplit e-type  2) (bsplit e-machine   2) (bsplit e-version   4)
+   (bsplit e-entry 8) (bsplit e-phoff     8) (bsplit e-shoff     8)
+   (bsplit e-flags 4) (bsplit e-ehsize    2) (bsplit e-phentsize 2)
+   (bsplit e-phnum 2) (bsplit e-shentsize 2) (bsplit e-shnum     2)
+   e-shstrndx])
 
-(defn write [program]
-  (let [program        (apply concat program)
-        section-header nil
-        sec-name-index 0
-        file-hdr       (file-header program-header
-                                    (count program)
-                                    section-header
-                                    sec-name-index)
-        target-file    (io/file "target/elf")]
+(defn write [filename & program-parts]
+  (let [{:keys [header program]} (apply program program-parts)
+        file-hdr-meta  (file-header-meta header (:size program) nil 0)
+        file-hdr       (file-header file-hdr-meta)
+        target-file    (io/file filename)]
     (with-open [s (java.io.FileOutputStream. target-file)]
       (.write s (byte-array (apply concat file-hdr)))
-      (.write s (byte-array (apply concat program-header)))
-      (.write s (byte-array program))
-      ;;(.write s (byte-array (apply concat section-header)))
-      )
+      (.write s (byte-array (apply concat header)))
+      (.write s (byte-array (:bytes program))))
     (.setExecutable target-file true true)))
 
-(write program)
+;; (write "target/elf" program-instructions hello-world-bytes)
+
+(def buffer (repeat 1000 0))
+
+(def program-instructions
+  [0xba  0x0e 0x00 0x00 0x00 ;; 0x0000000e
+   ;; movl %edx len 14
+   0xb9  0x0a 0x01 0x60 0x00 ;; 0x0060010a <- so we have to know the ptr address
+   ;; movl %ecx ptr to Hello, world!\n        but it's unknown until alloc'd
+   0xbb  0x01 0x00 0x00 0x00
+   ;; movl %ebx 1 stdout
+   0xb8  0x04 0x00 0x00 0x00
+   ;; movl %eax 4 sys_write
+   0xcd  0x80
+   ;; int 0x80 call kernel and exit
+   0xbb  0x00 0x00 0x00 0x00
+   ;; movl %ebx 0
+   0xb8  0x01 0x00 0x00 0x00
+   ;; movl %eax 1
+   0xcd  0x80
+   ])
+;; int 0x80 call kernel
+
+;; (def program-2
+;;   [0xba  0x0f 0x00 0x00 0x00
+;;    ;; mov  edx, 1             ; max length
+;;    0xb9  0x0a 0x01 0x60 0x00
+;;    ;; mov  ecx, buf           ; buffer
+;;    0xbb  0x00 0x00 0x00 0x00
+;;    ;; mov  ebx, 0             ; stdin
+;;    0xb8  0x03 0x00 0x00 0x00
+;;    ;; mov  eax, 3             ; sys_read
+;;    0xcd  0x80
+;;    ;; int  80h
+;;    0xba  0x03 0x00 0x00 0x00
+;;    ;; mov  edx, eax           ; length
+;;    0xb9  0x0a 0x01 0x60 0x00
+;;    ;; mov  ecx, buf           ; buffer
+;;    0xbb  0x01 0x00 0x00 0x00
+;;    ;; mov  ebx, 1             ; stdout
+;;    0xb8  0x04 0x00 0x00 0x00
+;;    ;; mov  eax, 4             ; sys_write
+;;    0xcd  0x80
+;;    ;; int  80h
+;;    (exit 0)
+;;    ])
+
+;; (write "target/rp" (flatten program-2) buffer)
