@@ -4,6 +4,7 @@
    [chasm.elf :as elf]
    [chasm.util :as u]
    [clojure.spec.alpha :as s]
+   [clojure.core.specs.alpha :as sa]
    [lift.f.functor :as f]
    [clojure.walk :as walk])
   (:import
@@ -237,16 +238,6 @@
         i (rest (take 2 (range)))]
     (symbol (str a i))))
 
-(defn label [env]
-  (let [[l] (:labels env)]
-    [l (update env :labels rest)]))
-
-(defn extend [env sym]
-  (let [[l] (:labels env)]
-    [l (-> env
-           (update :labels rest)
-           (assoc-in [:vars sym] l))]))
-
 ;;: Abstract Machine Spec
 ;;; =====================
 ;;;
@@ -294,13 +285,13 @@
         `(let ~(into [first-sym state] out)
            ~[expr (second (last (butlast out)))])))))
 
-(defn map-state [state f xs]
-  (if xs
-    (let-state state
-      [head (f (first xs))
-       tail (map-state f (next xs))]
-      (cons head tail))
-    [() state]))
+;; (defn map-state [state f xs]
+;;   (if xs
+;;     (let-state state
+;;       [head (f (first xs))
+;;        tail (map-state f (next xs))]
+;;       (cons head tail))
+;;     [() state]))
 
 (defprotocol Monad
   (m-return [_ v])
@@ -319,13 +310,14 @@
                 (m2 s'))))))
 
 (s/def ::m-do-binding
-  (s/and vector? (s/cat :binding simple-symbol? :<- #{'<-} :expr any?)))
+  (s/and vector? (s/cat :binding ::sa/binding-form :<- #{'<-} :expr any?)))
 
 (defmacro m-do [& exprs]
   (let [steps  (->> exprs
                     (map #(s/conform ::m-do-binding %))
                     (remove s/invalid?)
-                    (map (juxt :binding :expr))
+                    (map (juxt (comp #(s/unform ::sa/binding-form %) :binding)
+                               :expr))
                     (reverse))
         exprs' (remove #(s/valid? ::m-do-binding %) exprs)
         result (reduce (fn [expr [sym mv]]
@@ -360,17 +352,9 @@
   [s]
   (State. (fn [_] [nil s])))
 
-(defm map-state-m [f xs] -> State
-  (if xs
-    ((f/map cons) (f (first xs)) (map-state-m f (next xs)))
-    (return ())))
-
-(defm inc-m [x] -> State
-  (do [y <- (get)]
-      [_ <- (put (+ y x))]
-      [z <- (get)]
-      [_ <- (put (inc z))]
-      (return (inc x))))
+(defn modify
+  [f & args]
+  (State. (fn [s] (let [s' (apply f s args)] [s' s']))))
 
 (defn run-state [m s]
   (m s))
@@ -381,11 +365,33 @@
 (defn exec-state [m s]
   (second (m s)))
 
-(defm call-fn-m
+(defm label [] -> State
+  (do [{[l] :labels} <- (get)]
+      [_ <- (modify update :labels rest)]
+      (return l)))
+
+(defm extend [sym] -> State
+  (do [{[l] :labels} <- (get)]
+      [_ <- (modify #(-> %
+                         (update :labels rest)
+                         (assoc-in [:vars sym] l)))]
+      (return l)))
+
+(defm cons-m [x xs] -> State
+  (do [x' <- x]
+      [xs' <- xs]
+      (return (cons x' xs'))))
+
+(defm map-state [f xs] -> State
+  (if xs
+    (cons-m (f (first xs)) (map-state f (next xs)))
+    (return ())))
+
+(defm call-fn
   ;; TODO: this is the actual fn call, so we should be able to prep args
   ;; here. We need to eval the args, then load the results into registers
   ;; or push them onto the stack
-  [env op args] -> State
+  [op args] -> State
   (do [op'   <- (decurse op)]
       [args' <- (map-state decurse args)]
       (let [arity (count args)]
@@ -394,82 +400,56 @@
                  (cons op' args')
                  (epilogue arity))))))
 
-(defn call-fn
-  ;; TODO: this is the actual fn call, so we should be able to prep args
-  ;; here. We need to eval the args, then load the results into registers
-  ;; or push them onto the stack
-  [env op args]
-  (let [arity (count args)]
-    (do
-      [op'   (decurse op)
-       args' (map-state decurse args)]
-      (concat
-       (prologue arity)
-       (cons op' args')
-       (epilogue arity)))))
+(defm make-lambda [name [arg1] expr] -> State
+  (do [_     <- (modify assoc-in [:lex arg1] :rdi)]
+      [name' <- (extend name)]
+      [expr' <- (decurse expr)]
+      (return (cons [:label name'] expr'))))
 
-(defn make-lambda
-  [env name [arg1] expr]
-  (let-state (assoc-in env [:lex arg1] :rdi)
-    [name' (extend name)
-     expr' (decurse expr)]
-    (cons [:label name'] expr')))
+(defm if-then-else [test consequent alternative] -> State
+  (do [label'       <- (label)]
+      [test'        <- (decurse test)]
+      [consequent'  <- (decurse consequent)]
+      [alternative' <- (decurse alternative)]
+      (return [test' [:jne label'] consequent' [:label label'] alternative'])))
 
-(defn if-then-else [env test consequent alternative]
-  (let-state env
-    [label'       (label)
-     test'        (decurse test)
-     consequent'  (decurse consequent)
-     alternative' (decurse alternative)]
-    [test'
-     [:jne label']
-     consequent'
-     [:label label']
-     alternative']))
+(defm lookup-lexical-values [sym] -> State
+  (do [env <- (get)]
+      (return (when-let [reg (get-in env [:lex sym])]
+                ;; TODO: what do we do here? we're trying to use a fn binding
+                ;; we know its register - or something
+                ;; do something with reg
+                [[:mov reg :rax]]))))
 
-(defn lookup-lexical-values [env sym]
-  (when-let [reg (get-in env [:lex sym])]
-    ;; TODO: what do we do here? we're trying to use a fn binding
-    ;; we know its register - or something
-    [[[:mov reg :rax] ;; do something with reg
-      ]
-     env]))
+(defm lookup-function [sym] -> State
+  (do [env <- (get)]
+      (if-let [label (get (:vars env) sym)]
+        ;; TODO: here, we have a function call - we don't know any more
+        ;; this jumps to the function code, but what about args/etc not enough
+        ;; info this needs to go back up the stack to be intepreted there... or
+        ;; does it?
+        ;; load registers
+        (return [[:jmp label]])
+        (throw (Exception. (format "Unknown symbol: %s" (name sym)))))))
 
-(defn lookup-function [env sym]
-  (if-let [label (get (:vars env) sym)]
-    ;; TODO: here, we have a function call - we don't know any more
-    ;; this jumps to the function code, but what about args/etc not enough
-    ;; info this needs to go back up the stack to be intepreted there... or
-    ;; does it?
-    [ ;; load registers
-     [:jmp label]
-     env]
-    (throw (Exception. (format "Unknown symbol: %s" (name sym))))))
-
-(defn decurse [env form]
+(defm decurse [form] -> State
   (cond
     (seq? form)
     (let [[op & args] form]
       (case op
         if
-        (apply if-then-else env args)
+        (apply if-then-else args)
         fn
-        (apply make-lambda env args)
+        (apply make-lambda args)
         ;; else
-        (call-fn env op args)))
+        (call-fn op args)))
     (symbol? form)
-    (or (lookup-lexical-values env form)
-        (lookup-function env form))
+    (or (lookup-lexical-values form)
+        (lookup-function form))
     :else
-    [form env]))
+    (return form)))
 
-(first
- (decurse {:labels labels
-           :vars {'+ '+
-                  '= '=
-                  '- '-
-                  }}
-          fib'))
+(eval-state (decurse fib') {:labels labels :vars {'+ '+ '= '= '- '-}})
 
 ;; (map fib (range 0 10))
 
