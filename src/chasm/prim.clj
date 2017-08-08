@@ -1,8 +1,13 @@
 (ns chasm.prim
-  (:refer-clojure :exclude [print read])
+  (:refer-clojure :exclude [empty extend get print read])
   (:require
    [chasm.elf :as elf]
-   [chasm.util :as u]))
+   [chasm.util :as u]
+   [clojure.spec.alpha :as s]
+   [lift.f.functor :as f]
+   [clojure.walk :as walk])
+  (:import
+   [clojure.lang IFn Keyword]))
 
 ;;; TODO: primitives are implemented by the compiler
 
@@ -69,18 +74,6 @@
 ;;; read 2 numbers from stdin
 ;;; print the addition to std out
 
-(defn add-8 [a b]
-  [0xb6 (u/bsplit a 1) ;; movb %ah a
-   0xb7 (u/bsplit b 1) ;; movb %al b
-   ;;
-   ]
-  ;; got 2 numbers
-  ;; put 1 in an 8 bit register
-  ;; put other in an add register
-  ;; add
-  ;; put the result somewhere
-  )
-
 ;; where do `a` & `b` come from?
 ;; where does `ret` go? - it goes to the caller - the calling function must know
 ;; where to get it
@@ -102,35 +95,46 @@
                          (Ptr. (assoc (.-x x) :bsplit 4))
                          (u/bsplit x 4))]))
 
-(defmulti movq (fn [r x] (type x)))
+(def movq nil)
+(defmulti movq (fn [a b] [(type a) (type b)]))
 
-(defn movq-integer [r x]
+(defn movq-int->reg [x r]
   (let [reg (+ 0xc0 (.indexOf r64 r))]
     [0x48 0xc7 reg (u/bsplit x 4)]))
 
-(defmethod movq Long [r x]
-  (movq-integer r x))
+(defmethod movq [Long Keyword] [x r]
+  (movq-int->reg x r))
 
-(defmethod movq Integer [r x]
-  (movq-integer r x))
+(defmethod movq [Integer Keyword] [x r]
+  (movq-int->reg x r))
 
-(defmethod movq Ptr [r x]
+(defmethod movq [Ptr Keyword] [x r]
   (let [reg (+ 0xc0 (.indexOf r64 r))]
     [0x48 0xc7 reg (Ptr. (assoc (.-x x) :bsplit 4))]))
 
+(defmethod movq [Keyword Ptr] [r x]
+  (let [ir (.indexOf r64 r)]
+    (if (< ir 8)
+      (let [reg (+ 0x04 (* 8 ir))]
+        [0x48 0x89 reg 0x25 (Ptr. (assoc (.-x x) :bsplit 4))])
+      (let [reg (+ 0x04 (* 8 (- ir 8)))]
+        [0x4c 0x89 reg 0x25 (Ptr. (assoc (.-x x) :bsplit 4))]))))
+
+(defn reg->reg [op x y]
+  (let [ix (.indexOf r64 x)
+        iy (.indexOf r64 y)]
+    (cond (and (< ix 8) (< iy 8))
+          [0x48 op (+ 0xc0 (* 8 ix) iy)]
+          (and (< ix 8) (>= iy 8))
+          [0x49 op (+ 0xc0 (* 8 ix) (- iy 8))]
+          (and (>= ix 8) (< iy 8))
+          [0x4c op (+ 0xc0 (* 8 (- ix 8)) iy)]
+          (and (>= ix 8) (>= iy 8))
+          [0x4d op (+ 0xc0 (* 8 (- ix 8)) (- iy 8))])))
 
 ;; put contents of x in r
-(defmethod movq clojure.lang.Keyword [r x]
-  (let [ir (.indexOf r64 r)
-        ix (.indexOf r64 x)]
-    (cond (and (< ir 8) (< ix 8))
-          [0x48 0x89 (+ 0xc0 (* 8 ir) ix)]
-          (and (< ir 8) (>= ix 8))
-          [0x49 0x89 (+ 0xc0 (* 8 ir) (- ix 8))]
-          (and (>= ir 8) (< ix 8))
-          [0x4c 0x89 (+ 0xc0 (* 8 (- ir 8)) ix)]
-          (and (>= ir 8) (>= ix 8))
-          [0x4d 0x89 (+ 0xc0 (* 8 (- ir 8)) (- ix 8))])))
+(defmethod movq [Keyword Keyword] [r x]
+  (reg->reg 0x89 r x))
 
 ;; data Reg
 ;;   = RAX  -- Accumulator
@@ -151,43 +155,323 @@
     [(reg r) (u/bsplit x 4)]))
 
 (defn exit [code]
-  [(movq :rbx code)
+  [(movq code :rbx)
    ;; movl %ebx code
-   (movq :rax 1)
+   (movq 1 :rax)
    ;; movl %eax 1
    0xcd  0x80])
 
 (defn read [ptr len]
-  [(movq :rax 0)
+  [(movq 0   :rax)
    ;; clear rax
-   (movq :rdx len)
-   (movq :rcx ptr)
-   (movq :rbx 0) ;; stdin
-   (movq :rax 3) ;; sys_read
+   (movq len :rdx)
+   (movq ptr :rcx)
+   (movq 0   :rbx) ;; stdin
+   (movq 3   :rax) ;; sys_read
    0xcd  0x80])
 
 (defn print [ptr len]
-  [(movq :rax :rdx)
+  [(movq 1 :rdx #_:rax)
    ;; movl %edx len 14
-   (movq :rcx ptr)
+   (movq ptr  :rcx)
    ;; movl %ecx ptr to Hello, world!\n
-   (movq :rbx 1)
+   (movq 1    :rbx)
    ;; movl %ebx 1 stdout
-   (movq :rax 4)
+   (movq 4    :rax)
    ;; movl %eax 4 sys_write
    0xcd  0x80])
 
-;; (defn print-rax-len [ptr]
-;;   [0xba  (u/bsplit len 4)
-;;    ;; movl %edx len 14
-;;    0xb9  (u/bsplit ptr 4)
-;;    ;; movl %ecx ptr to Hello, world!\n
-;;    0xbb  [0x01 0x00 0x00 0x00]
-;;    ;; movl %ebx 1 stdout
-;;    0xb8  [0x04 0x00 0x00 0x00]
-;;    ;; movl %eax 4 sys_write
-;;    0xcd  [0x80]]
-;;   )
+;;: calling order rdi, rsi, rdx, rcx, r8, r9
+;;: sys_write rdi
+
+;; prologue :: X86 ()
+;; prologue = do
+;;   push rbp
+;;   mov rbp rsp
+
+;; epilogue :: X86 ()
+;; epilogue = do
+;;   pop rax
+;;   mov rsp rbp
+;;   pop rbp
+;;   ret
+(defmulti addq (fn [x y] [(type x) (type y)]))
+
+(defmethod addq [Keyword Keyword] [x y]
+  (reg->reg 0x01 x y))
+
+(defn add [ptr x y]
+  [(movq x :rax)
+   (movq y :rdi)
+   (addq :rdi :rax)
+   (movq 1 :rdi)
+   (addq :rdi :rax)
+   [0x48 0x83 0xc0 0x30] ;; addq 0x30 rax for ascii
+   (movq :rax ptr) ;; move :rax to memory
+   ])
+
+;; ret :: X86 ()
+;; ret = do
+;;   emit [0xc3]
+;; TODO: `ret`urn
+
+;; (fn fib [x]
+;;   (if (= x 0)
+;;     1
+;;     (if (= x 1)
+;;       1
+;;       (+ (fib (- x 1))
+;;          (fib (- x 2))))))
+
+(def fib'
+  '(fn fib [x]
+     (if (= x 0)
+       1
+       (if (= x 1)
+         1
+         (+ (fib (- x 1))
+            (fib (- x 2)))))))
+
+(def labels
+  (for [a (map char (range 97 123))
+        i (rest (take 2 (range)))]
+    (symbol (str a i))))
+
+(defn label [env]
+  (let [[l] (:labels env)]
+    [l (update env :labels rest)]))
+
+(defn extend [env sym]
+  (let [[l] (:labels env)]
+    [l (-> env
+           (update :labels rest)
+           (assoc-in [:vars sym] l))]))
+
+;;: Abstract Machine Spec
+;;; =====================
+;;;
+;;; Much of this is for simplicity/ease of implementation
+;;;
+;;; * all arguments to functions are pointers to memory
+;;; * all arguments to functions are going to be in the first n registers
+;;;   - there will be no functions with arity > 3 (for the moment)
+
+(def r64-args
+  [:rdi :rsi :rdx :rcx :r8 :r9])
+
+(defn prologue [n]
+  []
+  #_(loop [args r64-args
+         n n
+         out []]
+    (if (> n 0)
+      (recur (rest args)
+             (dec n)
+             (into out [[:push (first args)] [:mov (first args) :rsp]]))
+      out)))
+
+(defn epilogue [n]
+  [])
+
+(declare decurse)
+
+(defmacro let-state
+  {:style/indent :defn}
+  [state bindings expr]
+  (let [first-sym (gensym)]
+    (loop [bindings (->> bindings
+                         (partition 2)
+                         (mapv (fn [x] [(gensym) x])))
+           prevstate first-sym
+           out []]
+      (if (seq bindings)
+        (let [[[sym [binding expr]] & more] bindings]
+          (recur
+           more
+           sym
+           (into out
+                 [[binding sym] `(~(first expr) ~prevstate ~@(next expr))])))
+        `(let ~(into [first-sym state] out)
+           ~[expr (second (last (butlast out)))])))))
+
+(defn map-state [state f xs]
+  (if xs
+    (let-state state
+      [head (f (first xs))
+       tail (map-state f (next xs))]
+      (cons head tail))
+    [() state]))
+
+(defprotocol Monad
+  (m-return [_ v])
+  (m-bind   [t f]))
+
+(deftype State [f]
+  IFn
+  (invoke [_ x] (f x))
+  Monad
+  (m-return [_ v]
+    (State. (fn [s] [v s])))
+  (m-bind   [m f]
+    (State. (fn [s]
+              (let [[v s'] (m s)
+                    m2     (f v)]
+                (m2 s'))))))
+
+(s/def ::m-do-binding
+  (s/and vector? (s/cat :binding simple-symbol? :<- #{'<-} :expr any?)))
+
+(defmacro m-do [& exprs]
+  (let [steps  (->> exprs
+                    (map #(s/conform ::m-do-binding %))
+                    (remove s/invalid?)
+                    (map (juxt :binding :expr))
+                    (reverse))
+        exprs' (remove #(s/valid? ::m-do-binding %) exprs)
+        result (reduce (fn [expr [sym mv]]
+                         `(m-bind ~mv
+                                  (fn [~sym] ~expr)))
+                       (last exprs')
+                       steps)]
+    result))
+
+(defn empty [t]
+  (let [ctor (resolve (symbol (str "->" (name t))))]
+    (->> ctor meta :arglists first (map (constantly nil)) (apply ctor))))
+
+(defmacro defm [name arglist -> t expr]
+  (if (= -> '->)
+    `(defn ~name ~arglist
+       ~(walk/postwalk (fn [expr]
+                         (if (seq? expr)
+                           (case (first expr)
+                             return `(m-return (empty '~t) ~(second expr))
+                             do     `(m-do ~@(rest expr))
+                             expr)
+                           expr))
+                       expr))
+    (throw (Exception. "Invalid syntax: ->"))))
+
+(defn get
+  []
+  (State. (fn [s] [s s])))
+
+(defn put
+  [s]
+  (State. (fn [_] [nil s])))
+
+(defm map-state-m [f xs] -> State
+  (if xs
+    ((f/map cons) (f (first xs)) (map-state-m f (next xs)))
+    (return ())))
+
+(defm inc-m [x] -> State
+  (do [y <- (get)]
+      [_ <- (put (+ y x))]
+      [z <- (get)]
+      [_ <- (put (inc z))]
+      (return (inc x))))
+
+(defn run-state [m s]
+  (m s))
+
+(defn eval-state [m s]
+  (first (m s)))
+
+(defn exec-state [m s]
+  (second (m s)))
+
+(defm call-fn-m
+  ;; TODO: this is the actual fn call, so we should be able to prep args
+  ;; here. We need to eval the args, then load the results into registers
+  ;; or push them onto the stack
+  [env op args] -> State
+  (do [op'   <- (decurse op)]
+      [args' <- (map-state decurse args)]
+      (let [arity (count args)]
+        (return (concat
+                 (prologue arity)
+                 (cons op' args')
+                 (epilogue arity))))))
+
+(defn call-fn
+  ;; TODO: this is the actual fn call, so we should be able to prep args
+  ;; here. We need to eval the args, then load the results into registers
+  ;; or push them onto the stack
+  [env op args]
+  (let [arity (count args)]
+    (do
+      [op'   (decurse op)
+       args' (map-state decurse args)]
+      (concat
+       (prologue arity)
+       (cons op' args')
+       (epilogue arity)))))
+
+(defn make-lambda
+  [env name [arg1] expr]
+  (let-state (assoc-in env [:lex arg1] :rdi)
+    [name' (extend name)
+     expr' (decurse expr)]
+    (cons [:label name'] expr')))
+
+(defn if-then-else [env test consequent alternative]
+  (let-state env
+    [label'       (label)
+     test'        (decurse test)
+     consequent'  (decurse consequent)
+     alternative' (decurse alternative)]
+    [test'
+     [:jne label']
+     consequent'
+     [:label label']
+     alternative']))
+
+(defn lookup-lexical-values [env sym]
+  (when-let [reg (get-in env [:lex sym])]
+    ;; TODO: what do we do here? we're trying to use a fn binding
+    ;; we know its register - or something
+    [[[:mov reg :rax] ;; do something with reg
+      ]
+     env]))
+
+(defn lookup-function [env sym]
+  (if-let [label (get (:vars env) sym)]
+    ;; TODO: here, we have a function call - we don't know any more
+    ;; this jumps to the function code, but what about args/etc not enough
+    ;; info this needs to go back up the stack to be intepreted there... or
+    ;; does it?
+    [ ;; load registers
+     [:jmp label]
+     env]
+    (throw (Exception. (format "Unknown symbol: %s" (name sym))))))
+
+(defn decurse [env form]
+  (cond
+    (seq? form)
+    (let [[op & args] form]
+      (case op
+        if
+        (apply if-then-else env args)
+        fn
+        (apply make-lambda env args)
+        ;; else
+        (call-fn env op args)))
+    (symbol? form)
+    (or (lookup-lexical-values env form)
+        (lookup-function env form))
+    :else
+    [form env]))
+
+(first
+ (decurse {:labels labels
+           :vars {'+ '+
+                  '= '=
+                  '- '-
+                  }}
+          fib'))
+
+;; (map fib (range 0 10))
 
 (defn buffer [n]
   (repeat n 0))
@@ -196,7 +480,8 @@
 (def program
   (let [[ptr len] (alloc! (buffer 32))]
     (flatten
-     [(read ptr len)
+     [;;(read ptr len)
+      (add ptr 3 5)
       (print ptr nil)
       (exit 0)])))
 

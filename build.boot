@@ -1,7 +1,8 @@
 (def +project+ 'chasm/chasm)
 (def +version+ "0.1.0-SNAPSHOT")
 (def +description+ "A Scheme-like language compiled to ASM")
-(set-env! :dependencies '[[org.clojure/clojure "1.9.0-alpha17"]]
+(set-env! :dependencies '[[org.clojure/clojure "1.9.0-alpha17"]
+                          [lift/f "0.1.0-SNAPSHOT"]]
           :source-paths #{"src"})
 (task-options!
  pom {:project +project+ :version +version+ :description +description+})

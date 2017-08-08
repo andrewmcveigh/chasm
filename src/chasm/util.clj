@@ -21,3 +21,6 @@
   (let [s (Integer/toHexString (bunsplit xs))
         p (if (zero? (mod (count s) 2)) "" "0")]
     (symbol (str "0x" p s))))
+
+(defn pr-hex [xs]
+  (mapv (comp bunsplit-h #(bsplit % 1)) xs))
