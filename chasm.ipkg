@@ -1,0 +1,4 @@
+package chasm
+
+modules   = Elf
+opts      = "-p contrib"

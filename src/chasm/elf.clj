@@ -57,6 +57,7 @@
 (fed SHF_ORDERED          0x04000000 "Special ordering requirement (Solaris)")
 (fed SHF_EXCLUDE          0x08000000 "Section is excluded unless referenced or allocated (Solaris)")
 
+
 (def e-ident
   [:ei-magic      (mapv byte "ELF") ; magic number
    :ei-class      [2]                 ; 64 bit
@@ -213,11 +214,11 @@
       (.write s (byte-array (:bytes program))))
     (.setExecutable target-file true true)))
 
-;; (write "target/elf" program-instructions hello-world-bytes)
+(write "target/elf" program-instructions hello-world-bytes)
 
-(def buffer (repeat 1000 0))
+;; (def buffer (repeat 1000 0))
 
-(def program-instructions
+#_(def program-instructions
   [0xba  0x0e 0x00 0x00 0x00 ;; 0x0000000e
    ;; movl %edx len 14
    0xb9  0x0a 0x01 0x60 0x00 ;; 0x0060010a <- so we have to know the ptr address

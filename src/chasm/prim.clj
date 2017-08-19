@@ -307,7 +307,10 @@
     (State. (fn [s]
               (let [[v s'] (m s)
                     m2     (f v)]
-                (m2 s'))))))
+                (m2 s')))))
+  f/Functor
+  (f/-map [m f]
+    (State. (fn [s] (let [[v s'] (m s)] [(f v) s'])))))
 
 (s/def ::m-do-binding
   (s/and vector? (s/cat :binding ::sa/binding-form :<- #{'<-} :expr any?)))
@@ -339,6 +342,7 @@
                            (case (first expr)
                              return `(m-return (empty '~t) ~(second expr))
                              do     `(m-do ~@(rest expr))
+                             lift   `(m-lift-n (empty '~t) ~(second expr))
                              expr)
                            expr))
                        expr))
@@ -382,9 +386,35 @@
       [xs' <- xs]
       (return (cons x' xs'))))
 
+(defmacro do-args [args]
+
+  )
+; (a -> b) -> a -> m b
+(defn lift-m-n [n mt f]
+  (fn [ma mb]
+    (m-do [a <- ma]
+          [b <- mb]
+          (m-return mt (f a b)))))
+
+(defmacro lift-m-n [n mt f]
+  (let [bindings (repeatedly n gensym)
+        margs    (repeatedly n gensym)]
+    `(fn [~@margs]
+       ~(reduce (fn [expr [sym mv]] `(m-bind ~mv (fn [~sym] ~expr)))
+                `(m-return mt (f ~@bindings))
+                (reverse (map vector bindings margs))))))
+
+(defmacro m-lift [mt f]
+  (let [bindings (repeatedly n gensym)
+        margs    (repeatedly n gensym)]
+    `(fn [~@margs]
+       ~(reduce (fn [expr [sym mv]] `(m-bind ~mv (fn [~sym] ~expr)))
+                `(m-return mt (f ~@bindings))
+                (reverse (map vector bindings margs))))))
+
 (defm map-state [f xs] -> State
   (if xs
-    (cons-m (f (first xs)) (map-state f (next xs)))
+    ((lift cons) (f (first xs)) (map-state f (next xs)))
     (return ())))
 
 (defm call-fn
