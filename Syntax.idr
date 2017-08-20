@@ -29,13 +29,16 @@ data TType
   | TCon String
   | TArr TType TType
 
-free : TType -> SortedSet Symbol
-free (TVar x)   = insert x empty
-free (TCon x)   = empty
-free (TArr a b) = union (free a) (free b)
+interface Ftv a where
+  ftv : a -> SortedSet Symbol
+
+Ftv TType where
+  ftv (TVar x)   = insert x empty
+  ftv (TCon x)   = empty
+  ftv (TArr a b) = union (ftv a) (ftv b)
 
 occurs : Symbol -> TType -> Bool
-occurs x term = contains x $ free term
+occurs x term = contains x $ ftv term
 
 data Sub = MkSub (SortedMap Symbol TType)
 
@@ -56,11 +59,14 @@ singleton s t = MkSub $ fromList [(s, t)]
 comp : Sub -> Sub -> Sub
 comp s (MkSub t) = MkSub $ map (sub s) t
 
+comps : List Sub -> Sub
+comps (s :: ss) = foldr comp s ss
+
 data TErr
   = ErrInfiniteType
   | ErrArity
   | ErrUnification TType TType
-  | ErrUnboundVariable
+  | ErrUnboundVariable Symbol
 
 record EitherT (l : Type) (m : Type -> Type) (r : Type) where
   constructor MkEitherT
@@ -132,9 +138,67 @@ unify t1 t2 = throwErr $ ErrUnification t1 t2
 
 data Scheme = Forall (SortedSet Symbol) TType
 
+Ftv Scheme where
+  ftv (Forall as t) = difference (ftv t) as
+
 instantiate : Scheme -> Infer TType
 instantiate (Forall as t) =
   let as' = Data.SortedSet.toList as
   in do as'' <- traverse (const fresh) as'
         let s = MkSub $ fromList $ zip as' as''
         pure $ sub s t
+
+data Env = MkEnv (SortedMap Symbol Scheme)
+
+implementation Subst Scheme where
+  sub (MkSub s) (Forall as t) =
+    let s' = MkSub $ foldl (\s, k => delete k s) s as in
+      Forall as $ sub s' t
+
+implementation Subst Env where
+  sub s (MkEnv x) = MkEnv $ map (sub s) x
+
+Ftv Env where
+  ftv (MkEnv x) = foldl union empty $ map ftv $ values x
+
+generalize : Env -> TType -> Scheme
+generalize env t = Forall as t
+  where as = difference (ftv t) (ftv env)
+
+lookupEnv : Env -> Symbol -> Infer (Sub, TType)
+lookupEnv (MkEnv env) sym = case lookup sym env of
+  Nothing => throwErr $ ErrUnboundVariable sym
+  Just s  => do t <- instantiate s; pure (empty, t)
+
+extend : Env -> (Symbol, Scheme) -> Env
+extend (MkEnv env) (x, s) = MkEnv $ insert x s env
+
+infer : Env -> Expr -> Infer (Sub, TType)
+infer env (Sym e) = lookupEnv env e
+
+infer env (App e1 e2) =
+  do tv <- fresh
+     (s1, t1) <- infer env e1
+     (s2, t2) <- infer (sub s1 env) e2
+     s3       <- unify (sub s2 t1) (TArr t2 tv)
+     pure ((comps [s3, s2, s1]), (sub s3 tv))
+
+infer env (Lam x e) =
+  do tv <- fresh
+     (s1, t1) <- infer (extend env (x, (Forall empty tv))) e
+     pure (s1, (sub s1 (TArr tv t1)))
+
+infer env (Let x e1 e2) =
+  do (s1, t1) <- infer env e1
+     let env' = sub s1 env
+     let t    = generalize env' t1
+     (s2, t2) <- infer (extend env' (x, t)) e2
+     pure (comp s1 s2, t2)
+
+infer env (If t c a) =
+  do (s1, t1) <- infer env t
+     (s2, t2) <- infer env c
+     (s3, t3) <- infer env a
+     s4       <- unify t1 (TCon "Bool")
+     s5       <- unify t2 t2
+     pure (comps [s5, s4, s3, s2, s1], sub s5 t2)
