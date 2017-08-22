@@ -3,6 +3,9 @@ module Syntax
 import Control.Monad.State
 import Data.SortedSet
 import Data.SortedMap
+import Control.Monad.Either
+
+%access public export
 
 data Literal
   = LInt Integer
@@ -68,35 +71,6 @@ data TErr
   | ErrUnification TType TType
   | ErrUnboundVariable Symbol
 
-record EitherT (l : Type) (m : Type -> Type) (r : Type) where
-  constructor MkEitherT
-  runEitherT : m (Either l r)
-
-implementation MonadTrans (EitherT e) where
-  lift x = MkEitherT $ do a <- x; pure $ Right a
-
-implementation Functor f => Functor (EitherT a f) where
-  map f = MkEitherT . map (map f) . runEitherT
-
-implementation Monad f => Applicative (EitherT a f) where
-  pure = MkEitherT . pure . pure
-  (MkEitherT f) <*> (MkEitherT a) =
-    MkEitherT $ do b <- a
-                   g <- f
-                   case g of
-                     Left err => pure $ Left err
-                     Right h  => pure $ map h b
-
-implementation Monad m => Monad (EitherT a m) where
-  m >>= k = MkEitherT $ do a <- runEitherT m
-                           case a of
-                             Left  l => pure (Left l)
-                             Right r => runEitherT (k r)
-
-implementation MonadState s m => MonadState s (EitherT e m) where
-  get = lift get
-  put = lift . put
-
 Infer : Type -> Type
 Infer a = EitherT TErr (State Nat) a
 
@@ -105,9 +79,6 @@ runInfer m =
   case evalState (runEitherT m) 0 of
     Left err  => Left err
     Right res => Right res
-
-throwErr : Monad m => TErr -> EitherT TErr m a
-throwErr x = MkEitherT $ pure $ Left x
 
 bind : Symbol -> TType -> Infer Sub
 bind s t@(TVar a) = pure $ if s == a then empty else singleton s t
@@ -138,16 +109,6 @@ unify t1 t2 = throwErr $ ErrUnification t1 t2
 
 data Scheme = Forall (SortedSet Symbol) TType
 
-Ftv Scheme where
-  ftv (Forall as t) = difference (ftv t) as
-
-instantiate : Scheme -> Infer TType
-instantiate (Forall as t) =
-  let as' = Data.SortedSet.toList as
-  in do as'' <- traverse (const fresh) as'
-        let s = MkSub $ fromList $ zip as' as''
-        pure $ sub s t
-
 data Env = MkEnv (SortedMap Symbol Scheme)
 
 implementation Subst Scheme where
@@ -158,8 +119,18 @@ implementation Subst Scheme where
 implementation Subst Env where
   sub s (MkEnv x) = MkEnv $ map (sub s) x
 
-Ftv Env where
+implementation Ftv Scheme where
+  ftv (Forall as t) = difference (ftv t) as
+
+implementation Ftv Env where
   ftv (MkEnv x) = foldl union empty $ map ftv $ values x
+
+instantiate : Scheme -> Infer TType
+instantiate (Forall as t) =
+  let as' = Data.SortedSet.toList as
+  in do as'' <- traverse (const fresh) as'
+        let s = MkSub $ fromList $ zip as' as''
+        pure $ sub s t
 
 generalize : Env -> TType -> Scheme
 generalize env t = Forall as t

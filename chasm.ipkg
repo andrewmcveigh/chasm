@@ -1,4 +1,6 @@
 package chasm
 
-modules   = Elf
-opts      = "-p contrib"
+modules   = Elf, Control.Monad.Either, Syntax
+sourcedir = src
+main      = Reader
+opts      = "-p contrib -p lightyear"
