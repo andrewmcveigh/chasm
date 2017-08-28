@@ -5,6 +5,14 @@ import Syntax
 %hide Ptr
 %hide Prelude.Stream.(::)
 
+data TExpr
+  = TSym (Symbol,  TType)
+  | TApp (TExpr,   TType) (TExpr, TType)
+  | TLam (Symbol,  TType) (TExpr, TType)
+  | TLet (Symbol,  TType) (TExpr, TType) (TExpr, TType)
+  | TLit (Literal, TType)
+  | TIf  (TExpr,   TType) (TExpr, TType) (TExpr, TType)
+
 (>>) : Monad m => m a -> m b -> m b
 (>>) ma mb = ma >>= \_ => mb
 
@@ -49,14 +57,16 @@ data Instr = Mov  Val Val
            | Push Val
            | Pop  Val
            | Ret -- [0xc3]
+           | Ker -- [0xcd 0x80]
            | Nop  Val
+           | Add  Val Val
 
 record Mem where
   constructor MkMem
   instrs : List Instr
   codeBs : List Bits8
   dataBs : List Bits8
-  memOff : Int
+  memOff : Nat
   datOff : Nat
   symtab : SortedMap String Nat
   envtab : SortedMap Symbol Nat
@@ -65,32 +75,37 @@ record Mem where
 X86 : Type -> Type
 X86 = State Mem
 
--- This should go into program memory, but what is that?
-emit : List Bits8 -> X86 ()
-emit bs = modify $ \m => record { codeBs $= (++) bs } m
+toBs8 : Instr -> List Bits8
+toBs8 i = []
 
-emitInstr : Instr -> X86 ()
-emitInstr i = modify $ \m => record { instrs $= (::) i } m
+-- This should go into program memory, but what is that?
+emit : Instr -> X86 Nat
+emit i =
+  let bs = toBs8 i
+  in do offset <- gets memOff
+        let offset' = offset + length bs
+        modify $ \m => record { codeBs $= (++) bs , memOff = offset' } m
+        pure offset'
 
 store : List Bits8 -> X86 Nat
-store bs = do s <- get
-              let off = length bs + datOff s
-              _ <- modify $ \m => record { dataBs $= (++) bs, datOff = off} m
-              pure off
+store bs =
+  do s <- get
+     let off = length bs + datOff s
+     modify $ \m => record { dataBs $= (++) bs, datOff = off} m
+     pure off
 
 label : X86 Val -- returns a ptr?
-label = map A $ gets memOff
+label = map (A . cast) $ gets memOff
 
 ||| prologue is responsible for preparing a function call. It needs to handle
 ||| its arguments and push the stack frame on entry.
-prologue : Val -> X86 ()
-prologue v = (emitInstr $ Push (R Rdi)) >> emitInstr (Mov v $ R Rdi)
--- ^^ maybe we don't do the mov here?
+prologue : X86 ()
+prologue = (emit $ Push (R Rdi)) >> pure ()
 
 ||| epilogue is responsible for clearing up after a function call. It needs to
 ||| pop the stack frame on entry and handle the return
 epilogue : X86 ()
-epilogue = emitInstr (Pop (R Rdi)) >> emitInstr Ret
+epilogue = (emit $ Pop (R Rdi)) >> emit Ret >> pure ()
 
 -- a lexical binding is a pointer to a pointer?
 lookupLexicalBindings : Symbol -> X86 (Maybe Val)
@@ -110,10 +125,10 @@ lookupSymbol (MkSymbol s) =
 
 alloc : Nat -> X86 Nat
 alloc size = do off <- gets memOff
-                modify (\s => record { memOff $= (+ (cast size)) } s)
-                pure $ cast off
+                modify (\s => record { memOff $= (+ size) } s)
+                pure off
 
-compile : Expr -> X86 (Maybe Nat)
+compile : TExpr -> X86 (Maybe Nat)
 
 -- Compiles a symbol. What does that even mean?
 -- Well, 2 symbols with the same name should be the same thing. So firstly this
@@ -122,19 +137,11 @@ compile : Expr -> X86 (Maybe Nat)
 -- memory
 -- This is useful for symbols that are symbols at runtime. Symbols in source,
 -- should be looked up according to evaluation rules.
-compile (Sym name) = -- the (Maybe Nat) is the address of the thing.
+compile (TSym (name, t)) = -- the (Maybe Nat) is the address of the thing.
   do st <- gets envtab
      case lookup name st of
-       Just a  => emitInstr (Mov (A (cast a)) (R Rdi)) >> pure (Just a)
+       Just a  => emit (Mov (A (cast a)) (R Rdi)) >> pure (Just a)
        Nothing => pure Nothing
--- ^^ this also really depends on what type of thing the value at Rdi is, no?
--- if it's a string, we want to put a pointer to the string in Rdi
--- if it's a function, we want to put a pointer to the function in Rdi
--- if it's a ..., ...
--- where do we get the pointer from?
--- if it's an argument, do we just want to know that we need to look in Rdi
--- it doesn't really matter if it's an argument, or a fn, we want to put it
--- somewhere
 
 -- Compiles a function application. What is that?
 -- There is executable code somewhere in memory. We should have an address for
@@ -143,14 +150,16 @@ compile (Sym name) = -- the (Maybe Nat) is the address of the thing.
 -- This address or value needs moving into a register where the executable code
 -- can access it. The value that was already in the register needs saving, and
 -- putting back at the start and end of the executable blcok respectively.
-compile (App op arg) =
-  do op'  <- compile op -- should add instructions, and return address/label
+compile (TApp (op, _) (arg, _)) =
+  do op'  <- compile op  -- should add instructions, and return address/label
      arg' <- compile arg -- ditto, return address/label
-     case (op', arg') of
-       (Just op', Just arg') => do _ <- prologue $ A $ cast arg'
-                                   _ <- emitInstr $ Jmp $ A $ cast op'
-                                   _ <- epilogue
-                                   pure Nothing
+     case (op', arg') of -- this should be different depending on the type
+       (Just op', Just arg') =>
+         do prologue
+            emit $ Mov (A $ (cast op') - 64) (A $ cast arg')
+            emit $ Jmp $ A $ cast op'
+            epilogue
+            pure Nothing
 
 -- Compiles a lambda.
 -- Lambdas are partially evaluated at compile time. They need symbol lookup
@@ -164,7 +173,7 @@ compile (App op arg) =
 ---- there will be a pointer to a value in RDI
 -- emit a bunch of code
 -- return offset
-compile (Lam x e) =
+compile (TLam (x, _) (e, _)) =
   do ptrx <- alloc 64
      etab <- gets envtab
      modify (\s => record { envtab $= insert x ptrx } s)
@@ -172,13 +181,19 @@ compile (Lam x e) =
      modify (\s => record { envtab = etab } s)
      pure $ Just $ ptrx + 64
 
--- compile (Let b e1 e2) = ?undefined
+-- compile (Let b e1 e2) =
+--   do off  <- gets memOff
+--      etab <- gets envtab
+--      ptre <- compile e1
+--      modify (\s => record { envtab $= insert b ptre } s)
+--      complie e2
+--      pure $ Just off
 
-compile (Lit (LInt x)) = (emitInstr $ Nop $ I x) >> pure Nothing
+compile (TLit ((LInt x), _)) = (emit $ Nop $ I x) >> pure Nothing
 
 -- Compiles an if then else expression.
 -- First executes test, then depending on the result, executes then or else
-compile (If test consequent alternative) =
+compile (TIf (test, _) (consequent, _) (alternative, _)) =
   do label'       <- map Jmp label
      test'        <- compile test
      consequent'  <- compile consequent
@@ -187,9 +202,27 @@ compile (If test consequent alternative) =
 
 compile _ = pure Nothing
 
--- extend adds a binding to the runtime env
--- prim__extend : Val -> Expr -> X86 ()
--- prim__extend sym val =
 
--- mov : Val -> Val -> Instr
--- mov (R src) (R dst) =
+p__add : X86 Nat
+p__add =
+  do prologue
+     x <- alloc 64
+     y <- alloc 64
+     emit $ Mov (A $ cast x) (R Rax)
+     emit $ Mov (A $ cast y) (R Rdi)
+     emit $ Add (R Rdi) (R Rax)
+     epilogue
+     pure (y + 64)
+
+p__prn : X86 Nat
+p__prn =
+  do prologue
+     str <- alloc 64
+     len <- alloc 64
+     emit $ Mov (A $ cast len) (R Rdx)
+     emit $ Mov (I $ cast str) (R Rcx)
+     emit $ Mov (I 1) (R Rbx)
+     emit $ Mov (I 4) (R Rax)
+     emit Ker
+     epilogue
+     pure (len + 64)
