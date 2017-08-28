@@ -3,167 +3,80 @@ module Reader
 import Control.Monad.Either
 import Control.Monad.State
 import Data.SortedSet
+import Lightyear
+import Lightyear.Char
+import Lightyear.Strings
 import Syntax
 
-import public Lightyear
-import public Lightyear.Char
-import public Lightyear.Strings
-
-
-import Debug.Trace
-
-PushbackBuffer : Type
-PushbackBuffer = (List Char, List Char)
-
-record ReaderState where
-  constructor MkReaderState
-  delims : List Char
-  stackc : Nat
-  buffer : PushbackBuffer
-
-data Error = ReaderError
-           | UnmatchedDelimeter
-           | NestingTooDeep (Nat, Nat)
-           | EOFError
-           | CannotUnreadError
-
-Reader : Type -> Type
-Reader a = EitherT Error (State ReaderState) a
-
-runReader : Reader a -> String -> (Either Error a, ReaderState)
-runReader m s =
-  runState (runEitherT m) $ MkReaderState [] 0 (unpack s, [])
-
-readChar : Reader (Maybe Char)
-readChar =
-  do MkReaderState d sc (s, buf) <- get
-     case s of
-       []        => pure Nothing
-       (c :: s') => do _ <- put $ MkReaderState d sc (s', [c])
-                       pure $ Just c
-
-unreadChar : Reader ()
-unreadChar =
-  do MkReaderState d sc (s, buf) <- get
-     case buf of
-       []       => throwErr CannotUnreadError
-       (c :: _) => do _ <- put $ MkReaderState d sc (c :: s, []); pure ()
-
-readWhile : (Char -> Bool) -> Reader String
-readWhile p =
-  do c <- readChar
-     case c of
-       Just c  => if p c
-                  then do s <- readWhile p; pure $ strCons c s
-                  else do _ <- unreadChar; pure ""
-       Nothing => pure ""
-
-readUntil : (Char -> Bool) -> Reader String
-readUntil p = readWhile $ not . p
-
 tokenEnd : SortedSet Char
-tokenEnd = fromList [' ', '\n', '(', ')']
+tokenEnd = fromList [' ', '\n', '(', ')', '[', ']']
 
-readToken : Char -> Reader String
-readToken c = map (strCons c) $ readUntil $ \c => contains c tokenEnd
+specialChar : SortedSet Char
+specialChar = union tokenEnd $ fromList ['#', '^']
 
-readSymbol : Char -> Reader Expr
-readSymbol c = map (Sym . MkSymbol) $ readToken c
+str : List Char -> String
+str []        = ""
+str (s :: ss) = strCons s $ str ss
 
-data RExpr = FIN | EOF | E Expr | L (List Expr)
-implementation Show RExpr where
-  show FIN = "FIN"
-  show EOF = "EOF"
-  -- show E e = debug e
-  show _ = "oops"
-  -- show L e = show e
+applyApp : Vect 2 Expr -> Expr
+applyApp [x, e] = App x e
 
-whiteChars : SortedSet Char
-whiteChars = fromList [' ', '\n', '\t', '\f', '\r']
+token : Parser (List Char)
+token = (many $ satisfy $ not . (\c => contains c tokenEnd))
 
-whitespace : Char -> Bool
-whitespace c = contains c whiteChars
+symbol' : Parser (List Char)
+symbol' = map (::) (satisfy $ not . (\c => contains c specialChar)) <*> token
 
-delimStackCheck : Reader ()
-delimStackCheck =
-  do MkReaderState ds sc _ <- get
-     if length ds > 2 --|| sc > 5
-     then throwErr $ NestingTooDeep $ (length ds, sc)
-     else pure ()
+symbol : Parser Symbol
+symbol = map (MkSymbol . str) symbol' <?> "Symbol"
 
-pushDelim : Char -> Reader ()
-pushDelim c =
-  do _ <- delimStackCheck
-     modify (\s => record { delims $= (::) c } s)
+sym : Parser Expr
+sym = map Sym symbol
 
-popDelim : Reader ()
-popDelim =
-  do MkReaderState ds _ _ <- get
-     case ds of
-       []        => throwErr UnmatchedDelimeter
-       (_ :: xs) => modify (\s => record { delims = xs } s)
+fn : Parser String
+fn = spaces *> string "fn" <* spaces
 
-getDelim : Reader (Maybe Char)
-getDelim =
-  do MkReaderState ds _ _ <- get
-     case ds of
-       []       => pure Nothing
-       (c :: _) => pure $ Just c
+specialsym : String -> Parser Expr
+specialsym s = spaces *> map (Sym . MkSymbol) (string s) <* spaces
 
-(>>) : Monad m => m a -> m b -> m b
-(>>) ma mb = ma >>= \_ => mb
+lbind : Parser Symbol
+lbind = char '[' >! spaces *!> symbol <* spaces >! char ']'
+
+sexp : Parser a -> Parser a
+sexp = between (char '(') (char ')')
+
+vexp : Parser a -> Parser a
+vexp e = spaces *> between (char '[') (char ']') e <* spaces
+
+letcons : Parser (Symbol, Expr) -> Parser Expr -> Parser Expr
+letcons binding expr =
+  do (sym, e1) <- binding
+     e2        <- expr
+     pure $ Let sym e1 e2
+
+litInt : Parser Expr
+litInt = map (Lit . LInt . fromDigits) $ some digit
+  where fromDigits : List (Fin 10) -> Integer
+        fromDigits = foldl (\a, b => 10 * a + cast b) 0
 
 mutual
-  macro : Char -> Maybe (Char -> Reader RExpr)
-  macro '(' = Just $ \c => do _ <- pushDelim ')'; readList c
-  macro ')' = Just $ \_ => throwErr UnmatchedDelimeter
-  macro _   = Nothing
+  app : Parser Expr
+  app = sexp $ map applyApp (ntimes 2 expr)
 
-  readExprC : Char -> Reader RExpr
-  readExprC c =
-    if whitespace c
-    then readExpr
-    else case (macro c) of
-      Just r  => r c
-      Nothing => map E $ readSymbol c
+  lambda : Parser Expr
+  lambda = sexp $ fn *> map Lam lbind <*> expr
 
-  readExpr : Reader RExpr
-  readExpr =
-    do c <- readChar
-       d <- getDelim
-       case (c, d) of
-         (Just c', Just d') => if c' == d' then pure FIN else readExprC c'
-         (Just c', _)       => readExprC c'
-         _                  => throwErr EOFError
+  letbind : Parser (Symbol, Expr)
+  letbind = vexp $ liftA2 MkPair symbol expr
 
-  readList : Char -> Reader RExpr
-  readList c =
-    do expr <- readExpr
-       case expr of
-         FIN => do _ <- popDelim; pure $ L []
-         EOF => throwErr EOFError
-         E e => do (L l) <- readList c; pure $ L $ e :: l
-         L l => pure $ L l
-         _   => throwErr ReaderError
+  letexpr : Parser Expr
+  letexpr = sexp (specialsym "let" *> letcons letbind expr)
 
--- -- read =
--- --   do c <- readChar
--- --      case c of
+  ifexpr : Parser Expr
+  ifexpr = sexp $ specialsym "if" *> map If expr <*> expr <*> expr
 
--- main : IO ()
--- main = let (a, s) = runReader readExpr "(())"
---        in case a of
---          Left e => putStrLn "Err"
---          Right a => print a
-mutual
-  seq : Parser (List RExpr)
-  seq = char '(' *!> (expr `sepBy` (char ' ')) <* char ')'
+  expr' : Parser Expr
+  expr' = sym <|> litInt <|>| lambda <|>| app <|>| letexpr <|>| ifexpr
 
-  expr' : Parser RExpr
-  expr' =  (map JsonString jsonString)
-            <|> (map JsonNumber jsonNumber)
-            <|> (map JsonBool   jsonBool)
-            <|>| map seq  seq
-
-  expr : Parser RExpr
+  expr : Parser Expr
   expr = spaces *> expr' <* spaces

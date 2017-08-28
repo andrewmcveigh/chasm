@@ -8,8 +8,7 @@ import Control.Monad.Either
 %access public export
 
 data Literal
-  = LInt Integer
-  | LBool Bool
+  = LInt Int
 
 data Symbol = MkSymbol String
 
@@ -143,6 +142,9 @@ lookupEnv (MkEnv env) sym = case lookup sym env of
 
 extend : Env -> (Symbol, Scheme) -> Env
 extend (MkEnv env) (x, s) = MkEnv $ insert x s env
+
+newenv : Env
+newenv = MkEnv empty
 
 infer : Env -> Expr -> Infer (Sub, TType)
 infer env (Sym e) = lookupEnv env e
