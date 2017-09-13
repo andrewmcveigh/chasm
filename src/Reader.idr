@@ -55,7 +55,7 @@ letcons binding expr =
      pure $ Let sym e1 e2
 
 litInt : Parser Expr
-litInt = map (Lit . LInt . fromDigits) $ some digit
+litInt = map (Lit . LInt . fromInteger . fromDigits) $ some digit
   where fromDigits : List (Fin 10) -> Integer
         fromDigits = foldl (\a, b => 10 * a + cast b) 0
 

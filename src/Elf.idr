@@ -1,6 +1,10 @@
+module Elf
+
 import Data.Bits
 import Data.Bits as Bit
 import Data.Buffer
+
+%access public export
 
 bs : Integer -> Integer -> List Bits8
 bs 8 = reverse . b64ToBytes . fromInteger

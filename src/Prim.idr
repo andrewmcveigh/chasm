@@ -1,6 +1,11 @@
+module Prim
+
 import Control.Monad.State
+import Data.Bits
 import Data.SortedMap
 import Syntax
+
+%access public export
 
 %hide Ptr
 %hide Prelude.Stream.(::)
@@ -16,13 +21,20 @@ data TExpr
 (>>) : Monad m => m a -> m b -> m b
 (>>) ma mb = ma >>= \_ => mb
 
+szt : TType -> Nat
+szt (TCon "Int") = 64
+szt (TArr a b)   = szt a + szt b
+
+sz : TExpr -> Nat
+sz (TSym (_, t)) = szt t
+
 NULL : Integer
 NULL = 0x600000
 
 data R64 = Rax | Rcx | Rdx | Rbx | Rsp | Rbp | Rsi | Rdi
          | R8  | R9  | R10 | R11 | R12 | R13 | R14 | R15
 
-data Val = I Int | R R64 | A Int
+data Val = I Int | R R64 | A Int | P Int
 
 r64index : R64 -> Integer
 r64index r = case r of
@@ -40,17 +52,48 @@ rbp : Val; rbp = R Rbp; r13 : Val; r13 = R R13
 rsi : Val; rsi = R Rsi; r14 : Val; r14 = R R14
 rdi : Val; rdi = R Rdi; r15 : Val; r15 = R R15
 
-regToReg : Bits8 -> R64 -> R64 -> (Bits8, Bits8, Bits8)
+regToReg : Bits8 -> R64 -> R64 -> List Bits8
 regToReg op rx ry =
   let ix = r64index rx
       iy = r64index ry
   in if ix < 8 && iy < 8
-     then (0x48, op, fromInteger $ 0xc0 + 8 * ix + iy)
+     then [0x48, op, fromInteger $ 0xc0 + 8 * ix + iy]
      else if ix < 8 && iy >= 8
-     then (0x49, op, fromInteger $ 0xc0 + 8 * ix + (iy - 8))
+     then [0x49, op, fromInteger $ 0xc0 + 8 * ix + (iy - 8)]
      else if ix >= 8 && iy < 8
-     then (0x4c, op, fromInteger $ 0xc0 + 8 * (ix - 8) + iy)
-     else (0x4d, op, fromInteger $ 0xc0 + 8 * (ix - 8) + (iy - 8))
+     then [0x4c, op, fromInteger $ 0xc0 + 8 * (ix - 8) + iy]
+     else [0x4d, op, fromInteger $ 0xc0 + 8 * (ix - 8) + (iy - 8)]
+
+bs : Integer -> Integer -> List Bits8
+bs 8 = reverse . b64ToBytes . fromInteger
+bs 4 = reverse . b32ToBytes . fromInteger
+bs 2 = reverse . b16ToBytes . fromInteger
+bs 1 = reverse . b8ToBytes  . fromInteger
+bs _ = assert_unreachable
+
+opcode : R64 -> Bits8
+opcode = fromInteger . r64index
+
+toReg : Bits8 -> List Bits8 -> R64 -> List Bits8
+toReg op val reg =
+  let i = r64index reg
+  in if i < 8
+     then [0x48, op, fromInteger (0xc0 + i)] ++ val
+     else [0x49, op, fromInteger (0xc0 + i - 8)] ++ val
+
+derefReg : Integer -> R64 -> List Bits8
+derefReg op reg =
+  let i   = r64index reg
+  in if i < 8
+     then [fromInteger (op + i)]
+     else [0x41, fromInteger (op + (i - 8))]
+
+regToMem : R64 -> Integer -> List Bits8
+regToMem r ptr =
+  let r' = (0xc0 + (r64index r))
+  in if r' < 8
+     then 0x48 :: 0x4b :: fromInteger (0x04 + (8 * r')) :: 0x25 :: bs 8 ptr
+     else 0x4c :: 0x4b :: fromInteger (0x04 + (8 * (r' - 8))) :: 0x25 :: bs 8 ptr
 
 data Instr = Mov  Val Val
            | Jmp  Val
@@ -58,171 +101,42 @@ data Instr = Mov  Val Val
            | Pop  Val
            | Ret -- [0xc3]
            | Ker -- [0xcd 0x80]
-           | Nop  Val
+           | Lit  Integer
            | Add  Val Val
-
-record Mem where
-  constructor MkMem
-  instrs : List Instr
-  codeBs : List Bits8
-  dataBs : List Bits8
-  memOff : Nat
-  datOff : Nat
-  symtab : SortedMap String Nat
-  envtab : SortedMap Symbol Nat
-  astack : List Symbol
-
-X86 : Type -> Type
-X86 = State Mem
+           | Sub  Val Val
 
 toBs8 : Instr -> List Bits8
-toBs8 i = []
+toBs8 (Mov (R src) (R dst)) = regToReg 0x89 src dst
+toBs8 (Mov (I val) (R dst)) = toReg 0xc7 (bs 8 (cast val)) dst
+toBs8 (Mov (R src) (A dst)) = regToMem src (cast dst)
+toBs8 (Mov (A src) (R dst)) = toReg 0xc7 (bs 8 (cast src)) dst
+toBs8 (Add (R src) (R dst)) = regToReg 0x01 src dst
+toBs8 (Sub (R src) (R dst)) = regToReg 0x29 src dst
+-- all cases done?
 
--- This should go into program memory, but what is that?
-emit : Instr -> X86 Nat
-emit i =
-  let bs = toBs8 i
-  in do offset <- gets memOff
-        let offset' = offset + length bs
-        modify $ \m => record { codeBs $= (++) bs , memOff = offset' } m
-        pure offset'
+toBs8 (Push (R r)) = derefReg 0x50 r
+toBs8 (Pop  (R r)) = derefReg 0x58 r
 
-store : List Bits8 -> X86 Nat
-store bs =
-  do s <- get
-     let off = length bs + datOff s
-     modify $ \m => record { dataBs $= (++) bs, datOff = off} m
-     pure off
+toBs8 (Jmp  (R r)) =
+  let i   = r64index r
+  in if i < 8
+     then [0xff, fromInteger (0xe0 + i)]
+     else [0x41, 0xff, fromInteger (0xe0 + (i - 8))]
 
-label : X86 Val -- returns a ptr?
-label = map (A . cast) $ gets memOff
+toBs8 (Jmp  (A a)) = 0xff :: 0x25 :: bs 8 (cast a)
 
-||| prologue is responsible for preparing a function call. It needs to handle
-||| its arguments and push the stack frame on entry.
-prologue : X86 ()
-prologue = (emit $ Push (R Rdi)) >> pure ()
+toBs8 (Lit val) = bs 8 val
 
-||| epilogue is responsible for clearing up after a function call. It needs to
-||| pop the stack frame on entry and handle the return
-epilogue : X86 ()
-epilogue = (emit $ Pop (R Rdi)) >> emit Ret >> pure ()
+toBs8 Ret = [0xc3]
+toBs8 Ker = [0xcd, 0x80]
 
--- a lexical binding is a pointer to a pointer?
-lookupLexicalBindings : Symbol -> X86 (Maybe Val)
-lookupLexicalBindings name = pure $ Just $ A 0
+-- toBs8 (Add (I val) (R Rax)) = 0x48 :: 0x05 :: (bs 8 (cast val)) -- up to 32bit
+-- toBs8 (Add (I val) (R dst)) = toReg 0x81 (bs 8 (cast val)) dst  -- up to 32bit
+toBs8 _ = []
 
-lookupFunction : Symbol -> X86 (Maybe Val)
-lookupFunction s = gets ((map (A . cast)) . (lookup s) . envtab)
-
-lookupSymbol : Symbol -> X86 Nat
-lookupSymbol (MkSymbol s) =
-  do st <- get
-     case lookup s $ symtab st of
-       Nothing => store $ map fromChar $ unpack s
-       Just p  => pure p
-  where fromChar : Char -> Bits8
-        fromChar c = fromInteger $ cast $ ord c
-
-alloc : Nat -> X86 Nat
-alloc size = do off <- gets memOff
-                modify (\s => record { memOff $= (+ size) } s)
-                pure off
-
-compile : TExpr -> X86 (Maybe Nat)
-
--- Compiles a symbol. What does that even mean?
--- Well, 2 symbols with the same name should be the same thing. So firstly this
--- is a lookup to the symbol table, if the symbol hasn't already been created,
--- it creates the symbol, and returns the symbol's offset in the data section of
--- memory
--- This is useful for symbols that are symbols at runtime. Symbols in source,
--- should be looked up according to evaluation rules.
-compile (TSym (name, t)) = -- the (Maybe Nat) is the address of the thing.
-  do st <- gets envtab
-     case lookup name st of
-       Just a  => emit (Mov (A (cast a)) (R Rdi)) >> pure (Just a)
-       Nothing => pure Nothing
-
--- Compiles a function application. What is that?
--- There is executable code somewhere in memory. We should have an address for
--- that block of memory. We should also have one argument to the executable.
--- code this is either a literal value, or an address to some computed value.
--- This address or value needs moving into a register where the executable code
--- can access it. The value that was already in the register needs saving, and
--- putting back at the start and end of the executable blcok respectively.
-compile (TApp (op, _) (arg, _)) =
-  do op'  <- compile op  -- should add instructions, and return address/label
-     arg' <- compile arg -- ditto, return address/label
-     case (op', arg') of -- this should be different depending on the type
-       (Just op', Just arg') =>
-         do prologue
-            emit $ Mov (A $ (cast op') - 64) (A $ cast arg')
-            emit $ Jmp $ A $ cast op'
-            epilogue
-            pure Nothing
-
--- Compiles a lambda.
--- Lambdas are partially evaluated at compile time. They need symbol lookup
--- checks, macroexpansion, type-checking, and potentially inlining of
--- expressions that we can statically evaluate.
--- a lambda is anonymous
--- get the offset
--- set up binding
----- we know there is going to be an argument passed in
----- there may be a reference to the binding
----- there will be a pointer to a value in RDI
--- emit a bunch of code
--- return offset
-compile (TLam (x, _) (e, _)) =
-  do ptrx <- alloc 64
-     etab <- gets envtab
-     modify (\s => record { envtab $= insert x ptrx } s)
-     compile e
-     modify (\s => record { envtab = etab } s)
-     pure $ Just $ ptrx + 64
-
--- compile (Let b e1 e2) =
---   do off  <- gets memOff
---      etab <- gets envtab
---      ptre <- compile e1
---      modify (\s => record { envtab $= insert b ptre } s)
---      complie e2
---      pure $ Just off
-
-compile (TLit ((LInt x), _)) = (emit $ Nop $ I x) >> pure Nothing
-
--- Compiles an if then else expression.
--- First executes test, then depending on the result, executes then or else
-compile (TIf (test, _) (consequent, _) (alternative, _)) =
-  do label'       <- map Jmp label
-     test'        <- compile test
-     consequent'  <- compile consequent
-     alternative' <- compile alternative
-     pure Nothing
-
-compile _ = pure Nothing
-
-
-p__add : X86 Nat
-p__add =
-  do prologue
-     x <- alloc 64
-     y <- alloc 64
-     emit $ Mov (A $ cast x) (R Rax)
-     emit $ Mov (A $ cast y) (R Rdi)
-     emit $ Add (R Rdi) (R Rax)
-     epilogue
-     pure (y + 64)
-
-p__prn : X86 Nat
-p__prn =
-  do prologue
-     str <- alloc 64
-     len <- alloc 64
-     emit $ Mov (A $ cast len) (R Rdx)
-     emit $ Mov (I $ cast str) (R Rcx)
-     emit $ Mov (I 1) (R Rbx)
-     emit $ Mov (I 4) (R Rax)
-     emit Ker
-     epilogue
-     pure (len + 64)
+||| Max byte size of an instruction is 17 bytes. More accuracy can be added per
+||| instruction type and operand type.
+instrSize : Instr -> Int
+instrSize Ret = 1
+instrSize Ker = 2
+instrSize _ = 17
