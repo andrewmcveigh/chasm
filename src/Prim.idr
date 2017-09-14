@@ -107,9 +107,10 @@ data Instr = Mov  Val Val
 
 toBs8 : Instr -> List Bits8
 toBs8 (Mov (R src) (R dst)) = regToReg 0x89 src dst
-toBs8 (Mov (I val) (R dst)) = toReg 0xc7 (bs 8 (cast val)) dst
+toBs8 (Mov (I val) (R dst)) = toReg 0xc7 (bs 4 (cast val)) dst
+toBs8 (Mov (P _  ) (R _  )) = [0, 0, 0, 0, 0, 0, 0]
 toBs8 (Mov (R src) (A dst)) = regToMem src (cast dst)
-toBs8 (Mov (A src) (R dst)) = toReg 0xc7 (bs 8 (cast src)) dst
+toBs8 (Mov (A src) (R dst)) = toReg 0xc7 (bs 4 (cast src)) dst
 toBs8 (Add (R src) (R dst)) = regToReg 0x01 src dst
 toBs8 (Sub (R src) (R dst)) = regToReg 0x29 src dst
 -- all cases done?

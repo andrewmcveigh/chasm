@@ -39,7 +39,7 @@ emit i =
 store : List Bits8 -> X86 Nat
 store bs =
   do s <- get
-     let off = length bs + datOff s
+     let off = datOff s
      modify $ \m => record { dataBs $= (++) bs, datOff = off} m
      pure off
 
@@ -181,7 +181,9 @@ runCompile : X86 (Maybe Nat) -> (List Bits8, List Bits8)
 runCompile m =
   let (a, s) = runState m empty
       is = instrs s
-      sz = foldl1 (+) $ map instrSize is
+      sz = cast $ 0x600000 + 232 + (length $ concatMap toBs8 is)
+      -- ^^ could just compile once, and record the position of where offsets
+      -- need to be adjusted, then adjust the bytes
   in (concatMap toBs8 $ map (adj sz) $ reverse is, dataBs s)
 
 p__add : X86 Nat
@@ -197,13 +199,13 @@ p__add =
 
 p__prn : X86 (Maybe Nat)
 p__prn =
-  do prologue
-     emit $ Mov (R Rdi) (R Rdx)
-     emit $ Mov (R R8)  (R Rcx)
+  do --prologue
+     -- emit $ Mov (R Rdi) (R Rdx)
+     -- emit $ Mov (R R8)  (R Rcx)
      emit $ Mov (I 1) (R Rbx)
      emit $ Mov (I 4) (R Rax)
      emit Ker
-     epilogue
+     -- epilogue
      pure Nothing
 
 ||| the pointers to a & b must have already been assigned/allocated, a or b
@@ -218,10 +220,17 @@ p__pair =
      epilogue
      pure $ Just fst'
 
+exit : X86 (Maybe Nat)
+exit = do emit $ Mov (I 0) (R Rbx)
+          emit $ Mov (I 1) (R Rax)
+          emit Ker
+          pure $ Just 0
+
 helloWorld : X86 (Maybe Nat)
 helloWorld =
-  let s = "Hello, World!\n"
+  let s = "Hello, world!\n"
   in do p <- map cast $ store $ map fromChar $ unpack s
         emit $ Mov (I $ cast $ length s) (R Rdx)
         emit $ Mov (P p) (R Rcx)
         p__prn
+        exit

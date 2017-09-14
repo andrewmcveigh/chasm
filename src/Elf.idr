@@ -145,13 +145,15 @@ writeFile fn b8s =
 
 program : List Bits8 -> List Bits8 -> Program
 program instructions prgdata =
-  let ilen  = length instructions
-      iSize = E_EHSIZE + (3 * 56) + cast ilen
-      dSize = cast $ length prgdata
-      hdr1  = MkProgramHeaderEntry PT_LOAD (PF_X + PF_R) 0x0000 0x400000 0x400000 iSize iSize 0x200000
-      hdr2  = MkProgramHeaderEntry PT_LOAD (PF_W + PF_R) 0x010a 0x60010a 0x60010a dSize dSize 0x200000
-      hdr3  = MkProgramHeaderEntry 0x65041580 0x2800 0 0 0 0x08 0 0
-      prog  = instructions ++ prgdata
+  let ilen   = length instructions
+      iSize  = E_EHSIZE + (3 * 56) + cast ilen
+      dSize  = cast $ length prgdata
+      memOff = 0x600000 + iSize
+      hdr1   = MkProgramHeaderEntry PT_LOAD (PF_X + PF_R) 0x0000 0x400000 0x400000 iSize iSize 0x200000
+      hdr2   = MkProgramHeaderEntry PT_LOAD (PF_W + PF_R) iSize memOff memOff dSize dSize 0x200000
+      -- 0x010a <- is wrong, should be dynamic
+      hdr3   = MkProgramHeaderEntry 0x65041580 0x2800 0 0 0 0x08 0 0
+      prog   = instructions ++ prgdata
   in MkProgram [hdr1, hdr2, hdr3] prog $ cast $ length prog
 
 writeProgram : String -> Program -> IO (Either FileError ())
