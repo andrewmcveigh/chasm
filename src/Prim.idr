@@ -34,7 +34,7 @@ NULL = 0x600000
 data R64 = Rax | Rcx | Rdx | Rbx | Rsp | Rbp | Rsi | Rdi
          | R8  | R9  | R10 | R11 | R12 | R13 | R14 | R15
 
-data Val = I Int | R R64 | A Int | P Int
+data Val = I Int | R R64 | D R64 | A Int | P Int
 
 data Ptr = MkPtr Int | Fwd Nat
 
@@ -98,7 +98,6 @@ regToMem r ptr =
      else 0x4c :: 0x4b :: fromInteger (0x04 + (8 * (r' - 8))) :: 0x25 :: bs 8 ptr
 
 data Instr = Mov  Val Val
-           | Jmp  Val
            | Push Val
            | Pop  Val
            | Ret -- [0xc3]
@@ -108,13 +107,15 @@ data Instr = Mov  Val Val
            | Sub  Val Val
            | Div  Val
            | Test Val Val -- eq?
-           | SJz  Val     -- short relative 1 byte 2s complement forward/back
-           | NJz  Val     -- near relative? 4 byte ?
-           | AJz  Val     -- absolute indirect 4 byte address
-           | Jz   Ptr     -- Jump if (last result was) zero
            | Shl  Val Val -- Jump if (last result was) zero
            | Inc  Val     -- Decrement register
            | Dec  Val     -- Decrement register
+           | Jmp  Ptr     -- Jump to ptr
+           | Jz   Ptr     -- Jump if (last result was) zero
+           | Jnz  Ptr     -- Jump if (last result was) zero
+           | SJz  Val     -- short relative 1 byte 2s complement forward/back
+           | NJz  Val     -- near relative? 4 byte ?
+           | AJz  Val     -- absolute indirect 4 byte address
 
 toBs8 : Instr -> List Bits8
 toBs8 (Mov (R src) (R dst)) = regToReg 0x89 src dst
@@ -143,13 +144,13 @@ toBs8 (AJz  _) = assert_unreachable
 toBs8 (Push (R r)) = derefReg 0x50 r
 toBs8 (Pop  (R r)) = derefReg 0x58 r
 
-toBs8 (Jmp  (R r)) =
-  let i   = r64index r
-  in if i < 8
-     then [0xff, fromInteger (0xe0 + i)]
-     else [0x41, 0xff, fromInteger (0xe0 + (i - 8))]
+-- toBs8 (Jmp  (R r)) =
+--   let i   = r64index r
+--   in if i < 8
+--      then [0xff, fromInteger (0xe0 + i)]
+--      else [0x41, 0xff, fromInteger (0xe0 + (i - 8))]
 
-toBs8 (Jmp  (A a)) = 0xff :: 0x25 :: bs 8 (cast a)
+-- toBs8 (Jmp  (A a)) = 0xff :: 0x25 :: bs 8 (cast a)
 
 toBs8 (Lit val) = bs 8 val
 

@@ -45,6 +45,28 @@ emit i =
                               , memOff = offset'
                               , instrs $= (::) i } m
 
+inst1 : (Val -> Instr) -> Val -> X86 ()
+inst1 ctor dst = emit (ctor dst)
+
+
+comp2 : (b -> c) -> (a -> a -> b) -> a -> a -> c
+comp2 g f = \x, y => g (f x y)
+
+push : Val -> X86 (); push = emit . Push
+pop  : Val -> X86 (); pop  = emit . Pop
+div  : Val -> X86 (); div  = emit . Div
+inc  : Val -> X86 (); inc  = emit . Inc
+dec  : Val -> X86 (); dec  = emit . Dec
+
+mov  : Val -> Val -> X86 (); mov  = comp2 emit Mov
+add  : Val -> Val -> X86 (); add  = comp2 emit Add
+sub  : Val -> Val -> X86 (); sub  = comp2 emit Sub
+test : Val -> Val -> X86 (); test = comp2 emit Test
+
+jmp  : Ptr -> X86 (); jmp = emit . Jmp
+jz   : Ptr -> X86 (); jz  = emit . Jz
+jnz  : Ptr -> X86 (); jnz = emit . Jnz
+
 store : List Bits8 -> X86 Nat
 store bs =
   do s <- get
@@ -131,16 +153,17 @@ compile (TSym (name, t)) = -- the (Maybe Nat) is the address of the thing.
 -- This address or value needs moving into a register where the executable code
 -- can access it. The value that was already in the register needs saving, and
 -- putting back at the start and end of the executable blcok respectively.
-compile (TApp (op, _) (arg, _)) =
-  do op'  <- compile op  -- should add instructions, and return address/label
-     arg' <- compile arg -- ditto, return address/label
-     case (op', arg') of -- this should be different depending on the type
-       (Just op', Just arg') =>
-         do prologue
-            emit $ Mov (A $ (cast op') - 64) (A $ cast arg')
-            emit $ Jmp $ A $ cast op'
-            epilogue
-            pure Nothing
+
+-- compile (TApp (op, _) (arg, _)) =
+--   do op'  <- compile op  -- should add instructions, and return address/label
+--      arg' <- compile arg -- ditto, return address/label
+--      case (op', arg') of -- this should be different depending on the type
+--        (Just op', Just arg') =>
+--          do prologue
+--             emit $ Mov (A $ (cast op') - 64) (A $ cast arg')
+--             emit $ Jmp $ A $ cast op'
+--             epilogue
+--             pure Nothing
 
 -- Compiles a lambda.
 -- Lambdas are partially evaluated at compile time. They need symbol lookup
@@ -198,7 +221,7 @@ adjVal _ x = x
 
 adj : Int -> Instr -> Instr
 adj off (Mov x y) = Mov  (adjVal off x) (adjVal off y)
-adj off (Jmp x)   = Jmp  (adjVal off x)
+-- adj off (Jmp x)   = Jmp  (adjVal off x)
 adj off (Push x)  = Push (adjVal off x)
 adj off (Pop x)   = Pop  (adjVal off x)
 adj off Ret       = Ret
@@ -240,42 +263,45 @@ allocHeap =
 ||| put a number in rdi, returns in rsi how many bytes the number is long
 p__byte_len : X86 ()
 p__byte_len =
-  do emit $ Mov (R  Rdi) (R Rax)
-     emit $ Mov (I 0x00) (R Rcx)
-     emit $ Mov (I 0xff) (R Rbx)
+  do mov  (R  Rdi) (R Rax)
+     mov  (I 0x00) (R Rcx)
+     mov  (I 0xff) (R Rbx)
      loop <- ptr
-     emit $ Div  (R Rbx)
-     emit $ Add  (I   1) (R Rcx)
-     emit $ Test (I   0) (R Rax)
-     emit $ Jz loop
-     emit $ Mov  (R Rcx) (R Rsi)
+     div  (R Rbx)
+     add  (I    1) (R Rcx)
+     test (I    0) (R Rax)
+     jz   loop
+     mov  (R  Rcx) (R Rsi)
 
 ||| put a number in rdi, returns in rsi a pointer to the ascii string
 ||| representation of that number
 p__to_str_int64 : X86 ()
 p__to_str_int64 =
   do label "p__to_str_int64"
-     emit $ Mov  (R  Rdi) (R Rax)
-     emit $ Mov  (I   10) (R Rbx)
-     loop1 <- ptr
-     emit $ Div  (R  Rbx)
-     emit $ Add  (I 0x30) (R Rdx) -- add 0x30 for ascii conversion
-     emit $ Push (R  Rdx)
-     emit $ Inc  (R Rcx)
-     emit $ Test (I    0) (R Rax)
-     emit $ Jz loop1
-     -- emit $ Mov  (I   0) (R Rax) -- must already be 0
-     emit $ Mov  (R  Rcx) (R Rdi) -- put counter in rdi
-     allocHeap                    -- to allocate number of bytes
-     loop2 <- ptr
-     next <- fwd                  -- forward decl pointer
-     emit $ Pop  (R  Rdx)         -- get char off stack -> rdx
-     emit $ Add  (R  Rdx) (R Rax) -- add to rax
-     emit $ Test (I    0) (R Rcx) -- check if counter is zero?
-     emit $ Jz next               -- if true, jump out of loop to rlz next
-     emit $ Shl  (I    8) (R Rax) -- else bitshift rax 1 byte left
-     emit $ Dec  (R Rcx)          -- decrement counter
-     rlz next
+     mov  (R  Rdi) (R Rax)
+     mov  (I   10) (R Rbx)
+
+     convert <- ptr
+     mov  (I    0) (R Rdx) -- clear rdx
+     div  (R  Rbx)         -- div rax by rbx
+     add  (I 0x30) (R Rdx) -- add 0x30 for ascii conversion
+     push (R  Rdx)         -- push remainder onto stack
+     inc  (R  Rcx)         -- inc counter
+     test (R  Rax) (R Rax) -- is quotient in rax zero?
+     jnz  convert          -- if false,recur
+
+     mov  (R  Rcx) (R Rdi) -- put counter in rdi
+     allocHeap             -- allocate number of bytes in rdi
+     mov  (R  Rsi) (R Rbx) -- put ptr to allocated string in rbx
+     mov  (I    0) (R Rax) -- clear rax
+
+     popStr <- ptr
+     pop  (R  Rdx)         -- get char off stack -> rdx
+     mov  (R  Rdx) (D Rbx) -- move char to address in rbx
+     dec  (R  Rcx)         -- decrement counter
+     inc  (R  Rbx)         -- inc address to point to next byte of string
+     test (R  Rcx) (R Rcx) -- check if counter is zero?
+     jnz  popStr           -- if false, recur
 
 -- get int input, @ rdi
 -- divide by 10, quot is in rax, rem is in rdx
