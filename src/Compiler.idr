@@ -2,6 +2,7 @@ module Compiler
 
 import Control.Monad.State
 import Data.SortedMap
+import Data.Vect
 import Prim
 import Syntax
 
@@ -16,7 +17,8 @@ record Mem where
   datOff : Nat
   symtab : SortedMap String Nat
   envtab : SortedMap Symbol Nat
-  astack : List Symbol
+  nextid : Nat
+  fwdlup : SortedMap Nat Nat
 
 X86 : Type -> Type
 X86 = State Mem
@@ -26,7 +28,15 @@ codeSize = do
   is <- gets instrs
   pure $ foldl1 (+) $ map instrSize is
 
-emit : Instr -> X86 Nat
+emit : Instr -> X86 ()
+
+emit (Jz (MkPtr ptr)) = do
+  offset <- gets (cast . memOff)
+  let diff = offset - ptr
+  if diff <= 127 then
+     emit $ SJz (I (0xff - diff))
+     else pure ()
+
 emit i =
   let bs = reverse $ toBs8 i
   in do offset <- gets memOff
@@ -34,7 +44,6 @@ emit i =
         modify $ \m => record { codeBs $= (++) bs
                               , memOff = offset'
                               , instrs $= (::) i } m
-        pure offset'
 
 store : List Bits8 -> X86 Nat
 store bs =
@@ -43,18 +52,39 @@ store bs =
      modify $ \m => record { dataBs $= (++) bs, datOff = off} m
      pure off
 
-label : X86 Val -- returns a ptr?
-label = map (A . cast) $ gets memOff
+||| returns a pointer to the current code offset in memory
+ptr : X86 Ptr -- returns a ptr?
+ptr = map (MkPtr . cast) $ gets memOff
+
+fwd : X86 Ptr
+fwd = do
+  i <- gets nextid
+  modify (\m => record { nextid $= (+ 1) } m)
+  pure (Fwd i)
+
+rlz : Ptr -> X86 ()
+rlz (Fwd p) = do
+  offset <- gets memOff
+  modify (\m => record { fwdlup $= insert p offset } m)
+rlz _ = assert_unreachable
+
+
+||| labels the current code offset in the symtab, and returns a pointer to it
+label : String -> X86 Ptr -- returns a ptr?
+label s = do
+  offset <- gets memOff
+  modify (\m => record { symtab $= insert s offset } m)
+  pure (MkPtr (cast offset))
 
 ||| prologue is responsible for preparing a function call. It needs to handle
 ||| its arguments and push the stack frame on entry.
 prologue : X86 ()
-prologue = (emit $ Push (R Rdi)) >> pure ()
+prologue = emit $ Push (R Rdi)
 
 ||| epilogue is responsible for clearing up after a function call. It needs to
 ||| pop the stack frame on entry and handle the return
 epilogue : X86 ()
-epilogue = (emit $ Pop (R Rdi)) >> emit Ret >> pure ()
+epilogue = emit $ Pop (R Rdi)
 
 -- a lexical binding is a pointer to a pointer?
 lookupLexicalBindings : Symbol -> X86 (Maybe Val)
@@ -142,14 +172,14 @@ compile (TLam (x, _) (e, _)) =
 
 compile (TLit ((LInt x), _)) = (emit $ Lit $ cast x) >> pure Nothing
 
--- Compiles an if then else expression.
--- First executes test, then depending on the result, executes then or else
-compile (TIf (test, _) (consequent, _) (alternative, _)) =
-  do label'       <- map Jmp label
-     test'        <- compile test
-     consequent'  <- compile consequent
-     alternative' <- compile alternative
-     pure Nothing
+-- -- Compiles an if then else expression.
+-- -- First executes test, then depending on the result, executes then or else
+-- compile (TIf (test, _) (consequent, _) (alternative, _)) =
+--   do label'       <- map (Jmp . cast) ptr
+--      test'        <- compile test
+--      consequent'  <- compile consequent
+--      alternative' <- compile alternative
+--      pure Nothing
 
 compile _ = pure Nothing
 
@@ -160,7 +190,7 @@ prgoff : Int
 prgoff = (232 + 44)
 
 empty : Mem
-empty = MkMem [] [] [] 0 0 empty empty []
+empty = MkMem [] [] [] 0 0 empty empty 0 empty
 
 adjVal : Int -> Val -> Val
 adjVal offset (P x) = A $ x + offset
@@ -186,26 +216,83 @@ runCompile m =
       -- need to be adjusted, then adjust the bytes
   in (concatMap toBs8 $ map (adj sz) $ reverse is, dataBs s)
 
-p__add : X86 Nat
-p__add =
+p__add_int64 : X86 ()
+p__add_int64 =
   do prologue
-     x <- alloc 4
-     y <- alloc 4
-     emit $ Mov (A $ cast x) (R Rax)
-     emit $ Mov (A $ cast y) (R Rdi)
-     emit $ Add (R Rdi) (R Rax)
+     emit $ Mov (R Rdi) (R Rax)
+     emit $ Add (R R8)  (R Rax)
      epilogue
-     pure (y + 64)
+
+p__add_lit_int64 : Int -> Int -> X86 ()
+p__add_lit_int64 x y =
+  do emit $ Mov (I x) (R Rdi)
+     emit $ Mov (I y) (R R8)
+     p__add_int64
+
+-- always keep the current heap offset in Rbp
+-- heap starts in data section
+||| Puts current heap pointer in Rsi, 'allocates' no of bytes in int Rdi
+allocHeap : X86 ()
+allocHeap =
+  do emit $ Mov (R Rbp) (R Rsi)
+     emit $ Add (R Rdi) (R Rbp)
+
+||| put a number in rdi, returns in rsi how many bytes the number is long
+p__byte_len : X86 ()
+p__byte_len =
+  do emit $ Mov (R  Rdi) (R Rax)
+     emit $ Mov (I 0x00) (R Rcx)
+     emit $ Mov (I 0xff) (R Rbx)
+     loop <- ptr
+     emit $ Div  (R Rbx)
+     emit $ Add  (I   1) (R Rcx)
+     emit $ Test (I   0) (R Rax)
+     emit $ Jz loop
+     emit $ Mov  (R Rcx) (R Rsi)
+
+||| put a number in rdi, returns in rsi a pointer to the ascii string
+||| representation of that number
+p__to_str_int64 : X86 ()
+p__to_str_int64 =
+  do label "p__to_str_int64"
+     emit $ Mov  (R  Rdi) (R Rax)
+     emit $ Mov  (I   10) (R Rbx)
+     loop1 <- ptr
+     emit $ Div  (R  Rbx)
+     emit $ Add  (I 0x30) (R Rdx) -- add 0x30 for ascii conversion
+     emit $ Push (R  Rdx)
+     emit $ Inc  (R Rcx)
+     emit $ Test (I    0) (R Rax)
+     emit $ Jz loop1
+     -- emit $ Mov  (I   0) (R Rax) -- must already be 0
+     emit $ Mov  (R  Rcx) (R Rdi) -- put counter in rdi
+     allocHeap                    -- to allocate number of bytes
+     loop2 <- ptr
+     next <- fwd                  -- forward decl pointer
+     emit $ Pop  (R  Rdx)         -- get char off stack -> rdx
+     emit $ Add  (R  Rdx) (R Rax) -- add to rax
+     emit $ Test (I    0) (R Rcx) -- check if counter is zero?
+     emit $ Jz next               -- if true, jump out of loop to rlz next
+     emit $ Shl  (I    8) (R Rax) -- else bitshift rax 1 byte left
+     emit $ Dec  (R Rcx)          -- decrement counter
+     rlz next
+
+-- get int input, @ rdi
+-- divide by 10, quot is in rax, rem is in rdx
+-- put rem onto 8 bit stack
+-- inc count (rcx?) - length of string
+-- loop until 0
+-- pop stack, print string
 
 p__prn : X86 (Maybe Nat)
 p__prn =
-  do --prologue
-     -- emit $ Mov (R Rdi) (R Rdx)
-     -- emit $ Mov (R R8)  (R Rcx)
+  do prologue
+     emit $ Mov (R Rdi) (R Rdx)
+     emit $ Mov (R R8)  (R Rcx)
      emit $ Mov (I 1) (R Rbx)
      emit $ Mov (I 4) (R Rax)
+     epilogue
      emit Ker
-     -- epilogue
      pure Nothing
 
 ||| the pointers to a & b must have already been assigned/allocated, a or b
@@ -226,11 +313,14 @@ exit = do emit $ Mov (I 0) (R Rbx)
           emit Ker
           pure $ Just 0
 
+p__prn_lit_str : String -> X86 (Maybe Nat)
+p__prn_lit_str s =
+  do p <- map cast $ store $ map fromChar $ unpack s
+     emit $ Mov (I $ cast $ length s) (R Rdi)
+     emit $ Mov (P p) (R R8)
+     p__prn
+
 helloWorld : X86 (Maybe Nat)
 helloWorld =
-  let s = "Hello, world!\n"
-  in do p <- map cast $ store $ map fromChar $ unpack s
-        emit $ Mov (I $ cast $ length s) (R Rdx)
-        emit $ Mov (P p) (R Rcx)
-        p__prn
-        exit
+  do p__prn_lit_str "Hello, world!\n"
+     exit

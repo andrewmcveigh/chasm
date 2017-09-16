@@ -36,6 +36,8 @@ data R64 = Rax | Rcx | Rdx | Rbx | Rsp | Rbp | Rsi | Rdi
 
 data Val = I Int | R R64 | A Int | P Int
 
+data Ptr = MkPtr Int | Fwd Nat
+
 r64index : R64 -> Integer
 r64index r = case r of
   Rax => 0;  Rcx => 1;  Rdx => 2;  Rbx => 3;
@@ -104,6 +106,15 @@ data Instr = Mov  Val Val
            | Lit  Integer
            | Add  Val Val
            | Sub  Val Val
+           | Div  Val
+           | Test Val Val -- eq?
+           | SJz  Val     -- short relative 1 byte 2s complement forward/back
+           | NJz  Val     -- near relative? 4 byte ?
+           | AJz  Val     -- absolute indirect 4 byte address
+           | Jz   Ptr     -- Jump if (last result was) zero
+           | Shl  Val Val -- Jump if (last result was) zero
+           | Inc  Val     -- Decrement register
+           | Dec  Val     -- Decrement register
 
 toBs8 : Instr -> List Bits8
 toBs8 (Mov (R src) (R dst)) = regToReg 0x89 src dst
@@ -113,8 +124,22 @@ toBs8 (Mov (R src) (A dst)) = regToMem src (cast dst)
 toBs8 (Mov (A src) (R dst)) = toReg 0xc7 (bs 4 (cast src)) dst
 toBs8 (Add (R src) (R dst)) = regToReg 0x01 src dst
 toBs8 (Sub (R src) (R dst)) = regToReg 0x29 src dst
--- all cases done?
+toBs8 (Div (R src))         = let op = opcode src
+                              in if op < 8
+                                 then [0x48, 0xf7, 0xf0 + op]
+                                 else [0x49, 0xf7, 0xf0 + op]
+toBs8 (Test (I val) (R Rax)) = [0x48, 0xa9] ++ (bs 4 (cast val))
+toBs8 (Test (I val) (R reg)) = let op = opcode reg
+                               in if op < 8
+                                  then [0x48, 0xf7, 0xc0 + op] ++ (bs 4 (cast val))
+                                  else [0x49, 0xf7, 0xc0 + op] ++ (bs 4 (cast val))
+toBs8 (SJz (I x)) = [0xf4, fromInteger (cast x)]
+toBs8 (SJz     _) = assert_unreachable
+-- toBs8 (RJeq (A a)) = [0x74, (bs 1 (cast a))]
+toBs8 (AJz (A a)) = [0xff, 0x25] ++ (bs 4 (cast a))
+toBs8 (AJz  _) = assert_unreachable
 
+-- all cases done?
 toBs8 (Push (R r)) = derefReg 0x50 r
 toBs8 (Pop  (R r)) = derefReg 0x58 r
 
