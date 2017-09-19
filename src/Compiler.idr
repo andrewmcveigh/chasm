@@ -1,5 +1,6 @@
 module Compiler
 
+import Control.Monad.Either
 import Control.Monad.State
 import Data.SortedMap
 import Data.Vect
@@ -8,6 +9,22 @@ import Syntax
 
 %access public export
 
+infixr 3 ..
+(..) : (b -> c) -> (a -> a -> b) -> a -> a -> c
+(..) g f = \x, y => g (f x y)
+
+infixr 3 >=>
+(>=>) : Monad m => m a -> m a -> m a
+(>=>) ma mb = ma >>= (\_ => mb)
+
+record BlockState where
+  constructor MkBlockState
+  instrs : List Instr
+  offset : Nat
+
+Block : Type
+Block = State BlockState ()
+
 record Mem where
   constructor MkMem
   instrs : List Instr
@@ -15,58 +32,45 @@ record Mem where
   dataBs : List Bits8
   memOff : Nat
   datOff : Nat
-  symtab : SortedMap String Nat
   envtab : SortedMap Symbol Nat
-  nextid : Nat
-  fwdlup : SortedMap Nat Nat
+  blocks : SortedMap String (List Instr, Nat)
+  mainfn : String
+
+data CompilerError
+  = NoFunction String
+  | NoMainFunction
 
 X86 : Type -> Type
-X86 = State Mem
+X86 = EitherT CompilerError (State Mem)
 
-codeSize : X86 Int
-codeSize = do
-  is <- gets instrs
-  pure $ foldl1 (+) $ map instrSize is
+commit : Instr -> Block
+commit i = modify (\bs => record { instrs $= ((::) i)
+                                 , offset $= (+ (length (toBs8 i))) } bs )
 
-emit : Instr -> X86 ()
+push : Val -> Block; push = commit . Push
+pop  : Val -> Block; pop  = commit . Pop
+div  : Val -> Block; div  = commit . Div
+inc  : Val -> Block; inc  = commit . Inc
+dec  : Val -> Block; dec  = commit . Dec
 
-emit (Jz (MkPtr ptr)) = do
-  offset <- gets (cast . memOff)
-  let diff = offset - ptr
-  if diff <= 127 then
-     emit $ SJz (I (0xff - diff))
-     else pure ()
+mov  : Val -> Val -> Block; mov  = commit .. Mov
+add  : Val -> Val -> Block; add  = commit .. Add
+sub  : Val -> Val -> Block; sub  = commit .. Sub
+test : Val -> Val -> Block; test = commit .. Test
 
-emit i =
-  let bs = reverse $ toBs8 i
-  in do offset <- gets memOff
-        let offset' = offset + length bs
-        modify $ \m => record { codeBs $= (++) bs
-                              , memOff = offset'
-                              , instrs $= (::) i } m
+jmp  : Ptr -> Block; jmp = commit . Jmp
+jz   : Ptr -> Block; jz  = commit . Jz
+jnz  : Ptr -> Block; jnz = commit . Jnz
 
-inst1 : (Val -> Instr) -> Val -> X86 ()
-inst1 ctor dst = emit (ctor dst)
+ret  : Block; ret = commit Ret
+ker  : Block; ker = commit Ker
 
+||| Calls the function labeled by a String, the function must have been declared.
+||| TODO: could we statically check that the function has been declared?
+call : String -> Block
+call = commit . Call . F
 
-comp2 : (b -> c) -> (a -> a -> b) -> a -> a -> c
-comp2 g f = \x, y => g (f x y)
-
-push : Val -> X86 (); push = emit . Push
-pop  : Val -> X86 (); pop  = emit . Pop
-div  : Val -> X86 (); div  = emit . Div
-inc  : Val -> X86 (); inc  = emit . Inc
-dec  : Val -> X86 (); dec  = emit . Dec
-
-mov  : Val -> Val -> X86 (); mov  = comp2 emit Mov
-add  : Val -> Val -> X86 (); add  = comp2 emit Add
-sub  : Val -> Val -> X86 (); sub  = comp2 emit Sub
-test : Val -> Val -> X86 (); test = comp2 emit Test
-
-jmp  : Ptr -> X86 (); jmp = emit . Jmp
-jz   : Ptr -> X86 (); jz  = emit . Jz
-jnz  : Ptr -> X86 (); jnz = emit . Jnz
-
+||| Stores bytes in the data segment
 store : List Bits8 -> X86 Nat
 store bs =
   do s <- get
@@ -74,62 +78,31 @@ store bs =
      modify $ \m => record { dataBs $= (++) bs, datOff = off} m
      pure off
 
-||| returns a pointer to the current code offset in memory
-ptr : X86 Ptr -- returns a ptr?
-ptr = map (MkPtr . cast) $ gets memOff
-
-fwd : X86 Ptr
-fwd = do
-  i <- gets nextid
-  modify (\m => record { nextid $= (+ 1) } m)
-  pure (Fwd i)
-
-rlz : Ptr -> X86 ()
-rlz (Fwd p) = do
-  offset <- gets memOff
-  modify (\m => record { fwdlup $= insert p offset } m)
-rlz _ = assert_unreachable
-
-
-||| labels the current code offset in the symtab, and returns a pointer to it
-label : String -> X86 Ptr -- returns a ptr?
-label s = do
-  offset <- gets memOff
-  modify (\m => record { symtab $= insert s offset } m)
-  pure (MkPtr (cast offset))
-
-||| prologue is responsible for preparing a function call. It needs to handle
-||| its arguments and push the stack frame on entry.
-prologue : X86 ()
-prologue = emit $ Push (R Rdi)
-
-||| epilogue is responsible for clearing up after a function call. It needs to
-||| pop the stack frame on entry and handle the return
-epilogue : X86 ()
-epilogue = emit $ Pop (R Rdi)
-
--- a lexical binding is a pointer to a pointer?
-lookupLexicalBindings : Symbol -> X86 (Maybe Val)
-lookupLexicalBindings name = pure $ Just $ A 0
-
-lookupFunction : Symbol -> X86 (Maybe Val)
-lookupFunction s = gets ((map (A . cast)) . (lookup s) . envtab)
+||| returns a pointer to local offset of a block
+local : State BlockState Ptr
+local = gets (Local . cast . offset)
 
 fromChar : Char -> Bits8
 fromChar c = fromInteger $ cast $ ord c
 
-lookupSymbol : Symbol -> X86 Nat
-lookupSymbol (MkSymbol s) =
-  do st <- get
-     case lookup s $ symtab st of
-       Nothing => store $ map fromChar $ unpack s
-       Just p  => pure p
+zeros : Nat -> List Bits8
+zeros n = (take n (repeat 0))
 
 alloc : Nat -> X86 Nat
-alloc size = do off <- gets memOff
-                modify (\s => record { memOff $= (+ size)
-                                     , codeBs $= (++) (take size (repeat 0)) } s)
-                pure off
+alloc size = do
+  off <- gets memOff
+  modify (\s => record { memOff $= (+ size), codeBs $= (++) (zeros size) } s)
+  pure off
+
+||| prologue is responsible for preparing a function call. It needs to handle
+||| its arguments and push the stack frame on entry.
+prologue : Block
+prologue = pure () --push rdi
+
+||| epilogue is responsible for clearing up after a function call. It needs to
+||| pop the stack frame on entry and handle the return
+epilogue : Block
+epilogue = pure () --do pop rdi; ret
 
 compile : TExpr -> X86 (Maybe Nat)
 
@@ -140,11 +113,11 @@ compile : TExpr -> X86 (Maybe Nat)
 -- memory
 -- This is useful for symbols that are symbols at runtime. Symbols in source,
 -- should be looked up according to evaluation rules.
-compile (TSym (name, t)) = -- the (Maybe Nat) is the address of the thing.
-  do st <- gets envtab
-     case lookup name st of
-       Just a  => emit (Mov (A (cast a)) (R Rdi)) >> pure (Just a)
-       Nothing => pure Nothing
+-- compile (TSym (name, t)) = -- the (Maybe Nat) is the address of the thing.
+--   do st <- gets envtab
+--      case lookup name st of
+--        Just a  => emit (Mov (A (cast a)) (R Rdi)) >> pure (Just a)
+--        Nothing => pure Nothing
 
 -- Compiles a function application. What is that?
 -- There is executable code somewhere in memory. We should have an address for
@@ -193,7 +166,7 @@ compile (TLam (x, _) (e, _)) =
 --      complie e2
 --      pure $ Just off
 
-compile (TLit ((LInt x), _)) = (emit $ Lit $ cast x) >> pure Nothing
+-- compile (TLit ((LInt x), _)) = (emit $ Lit $ cast x) >> pure Nothing
 
 -- -- Compiles an if then else expression.
 -- -- First executes test, then depending on the result, executes then or else
@@ -213,140 +186,75 @@ prgoff : Int
 prgoff = (232 + 44)
 
 empty : Mem
-empty = MkMem [] [] [] 0 0 empty empty 0 empty
+empty = MkMem [] [] [] 0 0 empty empty "main"
 
 adjVal : Int -> Val -> Val
 adjVal offset (P x) = A $ x + offset
 adjVal _ x = x
 
 adj : Int -> Instr -> Instr
-adj off (Mov x y) = Mov  (adjVal off x) (adjVal off y)
--- adj off (Jmp x)   = Jmp  (adjVal off x)
-adj off (Push x)  = Push (adjVal off x)
-adj off (Pop x)   = Pop  (adjVal off x)
+adj off (Mov  x y) = Mov  (adjVal off x) (adjVal off y)
+adj off (Push x  ) = Push (adjVal off x)
+adj off (Pop  x  ) = Pop  (adjVal off x)
+adj off (Lit  x  ) = Lit  x
+adj off (Add  x y) = Add  (adjVal off x) (adjVal off y)
+adj off (Sub  x y) = Sub  (adjVal off x) (adjVal off y)
+adj off (Div  x  ) = Div  (adjVal off x)
+adj off (Test x y) = Test (adjVal off x) (adjVal off y)
+adj off (Shl  x y) = Shl  (adjVal off x) (adjVal off y)
+adj off (Inc  x  ) = Inc  (adjVal off x)
+adj off (Dec  x  ) = Dec  (adjVal off x)
+-- adj off (Jmp  x  ) = Jmp  (adjVal off x)
+-- adj off (Jz   x  ) = Jz   (adjVal off x)
+-- adj off (Jnz  x  ) = Jnz  (adjVal off x)
+adj off (SJz  x  ) = SJz  (adjVal off x)
+adj off (NJz  x  ) = NJz  (adjVal off x)
+adj off (AJz  x  ) = AJz  (adjVal off x)
+adj off (Call x  ) = Call (adjVal off x)
 adj off Ret       = Ret
 adj off Ker       = Ker
-adj off (Lit x)   = Lit  x
-adj off (Add x y) = Add  (adjVal off x) (adjVal off y)
-adj off (Sub x y) = Sub  (adjVal off x) (adjVal off y)
 
-runCompile : X86 (Maybe Nat) -> (List Bits8, List Bits8)
+runCompile : X86 () -> Either CompilerError (List Bits8, List Bits8)
 runCompile m =
-  let (a, s) = runState m empty
-      is = instrs s
-      sz = cast $ 0x600000 + 232 + (length $ concatMap toBs8 is)
+  case runState (runEitherT m) empty of
+    (Left error, _) => Left error
+    (Right    _, s) =>
+      let main = mainfn s
+          blks = blocks s
+      in case lookup main blks of
+        Nothing          => Left NoMainFunction
+        Just (mainBlock, len) => let blks = delete main blks in
+          Right (concatMap toBs8 (reverse mainBlock), dataBs s)
+
+          -- is = instrs s
+          -- sz = cast $ 0x600000 + 232 + (length $ concatMap toBs8 is)
       -- ^^ could just compile once, and record the position of where offsets
       -- need to be adjusted, then adjust the bytes
-  in (concatMap toBs8 $ map (adj sz) $ reverse is, dataBs s)
 
-p__add_int64 : X86 ()
-p__add_int64 =
-  do prologue
-     emit $ Mov (R Rdi) (R Rax)
-     emit $ Add (R R8)  (R Rax)
-     epilogue
+primfn : String -> Block -> X86 ()
+primfn name block =
+  let (_, s) = runState (do prologue; block; epilogue) (MkBlockState [] 0)
+  in modify (\m => record { blocks $= insert name (instrs s, offset s) } m )
 
-p__add_lit_int64 : Int -> Int -> X86 ()
-p__add_lit_int64 x y =
-  do emit $ Mov (I x) (R Rdi)
-     emit $ Mov (I y) (R R8)
-     p__add_int64
+loop : Block -> Block
+loop block =
+  do here <- local
+     block
+     jmp here
 
--- always keep the current heap offset in Rbp
--- heap starts in data section
-||| Puts current heap pointer in Rsi, 'allocates' no of bytes in int Rdi
-allocHeap : X86 ()
-allocHeap =
-  do emit $ Mov (R Rbp) (R Rsi)
-     emit $ Add (R Rdi) (R Rbp)
+while : Block -> Block -> Block
+while test body =
+  do here <- local
+     body
+     test
+     jz here
 
-||| put a number in rdi, returns in rsi how many bytes the number is long
-p__byte_len : X86 ()
-p__byte_len =
-  do mov  (R  Rdi) (R Rax)
-     mov  (I 0x00) (R Rcx)
-     mov  (I 0xff) (R Rbx)
-     loop <- ptr
-     div  (R Rbx)
-     add  (I    1) (R Rcx)
-     test (I    0) (R Rax)
-     jz   loop
-     mov  (R  Rcx) (R Rsi)
+whileNot : Block -> Block -> Block
+whileNot test body =
+  do here <- local
+     body
+     test
+     jnz here
 
-||| put a number in rdi, returns in rsi a pointer to the ascii string
-||| representation of that number
-p__to_str_int64 : X86 ()
-p__to_str_int64 =
-  do label "p__to_str_int64"
-     mov  (R  Rdi) (R Rax)
-     mov  (I   10) (R Rbx)
-
-     convert <- ptr
-     mov  (I    0) (R Rdx) -- clear rdx
-     div  (R  Rbx)         -- div rax by rbx
-     add  (I 0x30) (R Rdx) -- add 0x30 for ascii conversion
-     push (R  Rdx)         -- push remainder onto stack
-     inc  (R  Rcx)         -- inc counter
-     test (R  Rax) (R Rax) -- is quotient in rax zero?
-     jnz  convert          -- if false,recur
-
-     mov  (R  Rcx) (R Rdi) -- put counter in rdi
-     allocHeap             -- allocate number of bytes in rdi
-     mov  (R  Rsi) (R Rbx) -- put ptr to allocated string in rbx
-     mov  (I    0) (R Rax) -- clear rax
-
-     popStr <- ptr
-     pop  (R  Rdx)         -- get char off stack -> rdx
-     mov  (R  Rdx) (D Rbx) -- move char to address in rbx
-     dec  (R  Rcx)         -- decrement counter
-     inc  (R  Rbx)         -- inc address to point to next byte of string
-     test (R  Rcx) (R Rcx) -- check if counter is zero?
-     jnz  popStr           -- if false, recur
-
--- get int input, @ rdi
--- divide by 10, quot is in rax, rem is in rdx
--- put rem onto 8 bit stack
--- inc count (rcx?) - length of string
--- loop until 0
--- pop stack, print string
-
-p__prn : X86 (Maybe Nat)
-p__prn =
-  do prologue
-     emit $ Mov (R Rdi) (R Rdx)
-     emit $ Mov (R R8)  (R Rcx)
-     emit $ Mov (I 1) (R Rbx)
-     emit $ Mov (I 4) (R Rax)
-     epilogue
-     emit Ker
-     pure Nothing
-
-||| the pointers to a & b must have already been assigned/allocated, a or b
-||| could be infinite/recursive, and so sz will not return a meaningful value.
-p__pair : X86 (Maybe Nat)
-p__pair =
-  do prologue
-     fst' <- alloc 4
-     snd' <- alloc 4
-     emit $ Mov (R Rdi) (A $ cast fst')
-     emit $ Mov (R R8)  (A $ cast snd')
-     epilogue
-     pure $ Just fst'
-
-exit : X86 (Maybe Nat)
-exit = do emit $ Mov (I 0) (R Rbx)
-          emit $ Mov (I 1) (R Rax)
-          emit Ker
-          pure $ Just 0
-
-p__prn_lit_str : String -> X86 (Maybe Nat)
-p__prn_lit_str s =
-  do p <- map cast $ store $ map fromChar $ unpack s
-     emit $ Mov (I $ cast $ length s) (R Rdi)
-     emit $ Mov (P p) (R R8)
-     p__prn
-
-helloWorld : X86 (Maybe Nat)
-helloWorld =
-  do p__prn_lit_str "Hello, world!\n"
-     exit
+start : String -> X86 ()
+start name = modify (\m => record { mainfn = name } m)

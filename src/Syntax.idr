@@ -7,8 +7,7 @@ import Control.Monad.Either
 
 %access public export
 
-data Literal
-  = LInt Int
+data Literal = LInt Int
 
 data Symbol = MkSymbol String
 

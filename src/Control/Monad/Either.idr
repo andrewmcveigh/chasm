@@ -19,16 +19,12 @@ implementation Monad f => Applicative (EitherT a f) where
   pure = MkEitherT . pure . pure
   (MkEitherT f) <*> (MkEitherT a) =
     MkEitherT $ do b <- a
-                   g <- f
-                   case g of
-                     Left err => pure $ Left err
-                     Right h  => pure $ map h b
+                   Right g <- f | Left err => pure (Left err)
+                   pure $ map g b
 
 implementation Monad m => Monad (EitherT a m) where
-  m >>= k = MkEitherT $ do a <- runEitherT m
-                           case a of
-                             Left  l => pure (Left l)
-                             Right r => runEitherT (k r)
+  m >>= k = MkEitherT $ do Right a <- runEitherT m | Left e => pure (Left e)
+                           runEitherT (k a)
 
 implementation MonadState s m => MonadState s (EitherT e m) where
   get = lift get
@@ -39,7 +35,5 @@ throwErr = MkEitherT . pure . Left
 
 catchError : Monad m => EitherT e m a -> (e -> EitherT e m a) -> EitherT e m a
 catchError m h = MkEitherT $ do
-    a <- runEitherT m
-    case a of
-        Left  l => runEitherT $ h l
-        Right r => pure $ Right r
+  Right a <- runEitherT m | Left e => runEitherT (h e)
+  pure (Right a)

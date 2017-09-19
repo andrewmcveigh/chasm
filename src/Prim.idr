@@ -34,9 +34,14 @@ NULL = 0x600000
 data R64 = Rax | Rcx | Rdx | Rbx | Rsp | Rbp | Rsi | Rdi
          | R8  | R9  | R10 | R11 | R12 | R13 | R14 | R15
 
-data Val = I Int | R R64 | D R64 | A Int | P Int
+data Val = I Int -- literal integer
+         | R R64 -- register
+         | D R64 -- deref register
+         | A Int -- memory address
+         | P Int -- pointer to memory, subject to adjustment
+         | F String -- function lookup -> pointer to memory
 
-data Ptr = MkPtr Int | Fwd Nat
+data Ptr = Relative Int | Absolute Int | Local Int
 
 r64index : R64 -> Integer
 r64index r = case r of
@@ -116,6 +121,7 @@ data Instr = Mov  Val Val
            | SJz  Val     -- short relative 1 byte 2s complement forward/back
            | NJz  Val     -- near relative? 4 byte ?
            | AJz  Val     -- absolute indirect 4 byte address
+           | Call Val
 
 toBs8 : Instr -> List Bits8
 toBs8 (Mov (R src) (R dst)) = regToReg 0x89 src dst

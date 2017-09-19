@@ -1,19 +1,20 @@
 _start:
     movq $0xffffffffffffffff, %rdi
-    jmp  p__to_str_int64
+    call p__to_str_int64
+    call exit
 
 p__to_str_int64:
     movq  %rdi , %rax
     movq  $10  , %rbx
 
-loop1:
+convert:
     movq  $0   , %rdx # clear rdx
     divq  %rbx        # div rax by rbx (10)
     addq  $0x30, %rdx # convert rem in rdx to ascii
     pushq %rdx        # push rdx onto stack
     incq  %rcx        # increment counter
     testq %rax , %rax # if rax not zero?
-    jnz   loop1       # recur, else continue
+    jnz   convert     # recur, else continue
 
     movq  %rcx , %rdi # put counter in rdi, so we have the length
     movq  $0   , %rax # set rax to 0
@@ -33,6 +34,8 @@ prn:
     movq  $1   , %rbx
     movq  $4   , %rax
     int   $0x80
+    ret
+
 exit:
     movq  $0   , %rbx
     movq  $1   , %rax
