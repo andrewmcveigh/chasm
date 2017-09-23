@@ -4,6 +4,8 @@ import Data.Bits
 import Data.Bits as Bit
 import Data.Buffer
 
+%default total
+
 %access public export
 
 bs : Integer -> Integer -> List Bits8

@@ -5,6 +5,8 @@ import Control.Monad.Either
 import Control.Monad.State
 import Prim
 
+%default total
+
 %access public export
 
 p__add_int64 : X86 ()
@@ -60,7 +62,7 @@ p__to_str_int64 =
 
     whileNot (test rcx rcx) $ do
       pop  rdx         -- get char off stack -> rdx
-      mov  rdx (D Rbx) -- move char to address in rbx
+      mov  rdx _rbx    -- move char to address in rbx
       dec  rcx         -- decrement counter
       inc  rbx         -- inc address to point to next byte of string
 
@@ -94,11 +96,11 @@ p__exit =
 
 p__prn_lit_str : String -> X86 Block
 p__prn_lit_str s = do
-  p <- map cast $ store $ map fromChar $ unpack s
+  p <- store $ map fromChar $ unpack s
   let len = (I $ cast $ length s)
   pure $ do mov  len   rdi
-            mov  (P p) r8
-            call "p__prn"
+            mov  (P (Data (cast p))) r8 -- TODO: this doesn't work because later
+            call "p__prn" -- we try to deref the pointer, but it's an address
 
 helloWorld : X86 ()
 helloWorld = do

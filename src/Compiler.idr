@@ -4,13 +4,16 @@ import Control.Monad.Either
 import Control.Monad.State
 import Data.SortedMap
 import Data.Vect
+import Debug.Trace
 import Prim
 import Syntax
+
+%default total
 
 %access public export
 
 infixr 3 ..
-(..) : (b -> c) -> (a -> a -> b) -> a -> a -> c
+(..) : (c -> d) -> (a -> b -> c) -> a -> b -> d
 (..) g f = \x, y => g (f x y)
 
 infixr 3 >=>
@@ -34,6 +37,7 @@ record Mem where
   datOff : Nat
   envtab : SortedMap Symbol Nat
   blocks : SortedMap String (List Instr, Nat)
+  symtab : SortedMap String Nat
   mainfn : String
 
 data CompilerError
@@ -45,18 +49,18 @@ X86 = EitherT CompilerError (State Mem)
 
 commit : Instr -> Block
 commit i = modify (\bs => record { instrs $= ((::) i)
-                                 , offset $= (+ (length (toBs8 i))) } bs )
+                                 , offset $= (+ (length (codegen i))) } bs )
 
 push : Val -> Block; push = commit . Push
-pop  : Val -> Block; pop  = commit . Pop
-div  : Val -> Block; div  = commit . Div
-inc  : Val -> Block; inc  = commit . Inc
-dec  : Val -> Block; dec  = commit . Dec
+pop  : R_M -> Block; pop  = commit . Pop
+div  : R_M -> Block; div  = commit . Div
+inc  : R_M -> Block; inc  = commit . Inc
+dec  : R_M -> Block; dec  = commit . Dec
 
-mov  : Val -> Val -> Block; mov  = commit .. Mov
-add  : Val -> Val -> Block; add  = commit .. Add
-sub  : Val -> Val -> Block; sub  = commit .. Sub
-test : Val -> Val -> Block; test = commit .. Test
+mov  : Val -> R_M -> Block; mov  = commit .. Mov
+add  : Val -> R64 -> Block; add  = commit .. Add
+sub  : Val -> R64 -> Block; sub  = commit .. Sub
+test : Val -> R_M -> Block; test = commit .. Test
 
 jmp  : Ptr -> Block; jmp = commit . Jmp
 jz   : Ptr -> Block; jz  = commit . Jz
@@ -68,7 +72,7 @@ ker  : Block; ker = commit Ker
 ||| Calls the function labeled by a String, the function must have been declared.
 ||| TODO: could we statically check that the function has been declared?
 call : String -> Block
-call = commit . Call . F
+call = commit . Call . FRef
 
 ||| Stores bytes in the data segment
 store : List Bits8 -> X86 Nat
@@ -80,7 +84,7 @@ store bs =
 
 ||| returns a pointer to local offset of a block
 local : State BlockState Ptr
-local = gets (Local . cast . offset)
+local = gets (Loc . fromInteger . cast . offset)
 
 fromChar : Char -> Bits8
 fromChar c = fromInteger $ cast $ ord c
@@ -102,7 +106,15 @@ prologue = pure () --push rdi
 ||| epilogue is responsible for clearing up after a function call. It needs to
 ||| pop the stack frame on entry and handle the return
 epilogue : Block
-epilogue = pure () --do pop rdi; ret
+epilogue = ret; -- pure () --do pop rdi; ret
+
+data TExpr
+  = TSym (Symbol,  TType)
+  | TApp (TExpr,   TType) (TExpr, TType)
+  | TLam (Symbol,  TType) (TExpr, TType)
+  | TLet (Symbol,  TType) (TExpr, TType) (TExpr, TType)
+  | TLit (Literal, TType)
+  | TIf  (TExpr,   TType) (TExpr, TType) (TExpr, TType)
 
 compile : TExpr -> X86 (Maybe Nat)
 
@@ -186,45 +198,104 @@ prgoff : Int
 prgoff = (232 + 44)
 
 empty : Mem
-empty = MkMem [] [] [] 0 0 empty empty "main"
+empty = MkMem [] [] [] 0 0 empty empty empty "main"
 
-adjVal : Int -> Val -> Val
-adjVal offset (P x) = A $ x + offset
-adjVal _ x = x
+interface Adjustable a where
+  adjv : Int -> Int -> a -> a
 
-adj : Int -> Instr -> Instr
-adj off (Mov  x y) = Mov  (adjVal off x) (adjVal off y)
-adj off (Push x  ) = Push (adjVal off x)
-adj off (Pop  x  ) = Pop  (adjVal off x)
-adj off (Lit  x  ) = Lit  x
-adj off (Add  x y) = Add  (adjVal off x) (adjVal off y)
-adj off (Sub  x y) = Sub  (adjVal off x) (adjVal off y)
-adj off (Div  x  ) = Div  (adjVal off x)
-adj off (Test x y) = Test (adjVal off x) (adjVal off y)
-adj off (Shl  x y) = Shl  (adjVal off x) (adjVal off y)
-adj off (Inc  x  ) = Inc  (adjVal off x)
-adj off (Dec  x  ) = Dec  (adjVal off x)
--- adj off (Jmp  x  ) = Jmp  (adjVal off x)
--- adj off (Jz   x  ) = Jz   (adjVal off x)
--- adj off (Jnz  x  ) = Jnz  (adjVal off x)
-adj off (SJz  x  ) = SJz  (adjVal off x)
-adj off (NJz  x  ) = NJz  (adjVal off x)
-adj off (AJz  x  ) = AJz  (adjVal off x)
-adj off (Call x  ) = Call (adjVal off x)
-adj off Ret       = Ret
-adj off Ker       = Ker
+Adjustable Val where
+  adjv coff doff (P (Code x)) = A (x + coff)
+  adjv coff doff (P (Data x)) = A (x + doff)
+  adjv _ _ x = x
+
+Adjustable R_M where
+  adjv coff doff (P' (Code x)) = A' (x + coff)
+  adjv coff doff (P' (Data x)) = A' (x + doff)
+  adjv _ _ x = x
+
+Adjustable Ptr where
+  adjv coff _ (Abs x) = Abs (x + coff)
+  adjv _ _ x = x
+
+adj : Int -> Int -> Instr -> Instr
+adj coff doff (Mov  x y) = Mov  (adjv coff doff x) (adjv coff doff y)
+adj coff doff (Add  x y) = Add  (adjv coff doff x) y
+adj coff doff (Sub  x y) = Sub  (adjv coff doff x) y
+adj coff doff (Test x y) = Test (adjv coff doff x) (adjv coff doff y)
+adj coff doff (Push x  ) = Push (adjv coff doff x)
+adj coff doff (Pop  x  ) = Pop  (adjv coff doff x)
+adj coff doff (Lit  x  ) = Lit  x
+adj coff doff (Div  x  ) = Div  (adjv coff doff x)
+adj coff doff (Inc  x  ) = Inc  (adjv coff doff x)
+adj coff doff (Dec  x  ) = Dec  (adjv coff doff x)
+adj coff doff (Jmp  x  ) = Jmp  (adjv coff doff x)
+adj coff doff (Jz   x  ) = Jz   (adjv coff doff x)
+adj coff doff (Jnz  x  ) = Jnz  (adjv coff doff x)
+adj coff doff (Call x  ) = Call x
+adj coff doff Ret       = Ret
+adj coff doff Ker       = Ker
+-- adj off (Shl  x y) = Shl  (adjv off x) (adjv off y)
+
+resolve : Instr -> X86 Instr
+resolve (Call (FRef name)) = do
+  Just address <- gets (lookup name . symtab)
+                | Nothing => throwErr (NoFunction name)
+  pure (Call (MRel (cast address))) -- this needs to be relative to this call instruction
+resolve x = pure x
+-- trying to resolve something this way, before it exists obviously doesn't work
+-- can I use the type system to prevent this? Or will I always need this?
+-- Forward refs are probably necessary. If we know the order that we will lay
+-- down the bytes, and the sizes, we can pre-compute the offsets.
+
+emit : Nat -> Nat -> String -> List Instr -> X86 ()
+emit coff doff name instrs = do
+  instrs' <- traverse (resolve . adj (cast coff) (cast doff)) instrs
+  let bytes = concatMap codegen (reverse instrs')
+  offset <- gets memOff
+  modify (\m => record { codeBs $= (\bs => bs ++ bytes)
+                       , memOff $= (+ (length bytes))
+                       , symtab $= insert name offset} m)
+
+-- TODO: calls not relative - call to wrong address
+-- TODO: mov int to r8 in hello world wrong - address fn was stepping wrong
+-- 49 8b 04 25 42 00 60 00 # mov ? 0x00600042 = 0x00600000 + 66 -- don't work - need the full offset
+-- 49 c7 c0 29 01 60 00 # mov 0x00600129 r8 -- does work
+
+Symtab : Type
+Symtab = SortedMap String Nat
+
+mkSymtab : String -> Nat ->  SortedMap String (List Instr, Nat) -> (Symtab, Nat)
+mkSymtab main len blocks =
+  let acc = (fromList [(main, 0)], len) in
+    foldl offset acc (toList blocks)
+  where
+    offset : (Symtab, Nat) -> (String, (List Instr, Nat)) -> (Symtab, Nat)
+    offset (tab, off) (name, (_, len)) = (insert name off tab, off + len)
+
+preCompile : X86 () -> X86 ()
+preCompile m = do
+  m
+  main <- gets mainfn
+  blks <- gets blocks
+  case lookup main blks of
+    Nothing           => throwErr NoMainFunction
+    Just (block, len) =>
+      let blks' = delete main blks
+          (stab, doff) = mkSymtab main len blks'
+          coff  = 232 -- current program header size
+          doff' = 0x600000 + coff + doff in
+        do modify (\m => record { symtab = stab } m)
+           emit coff doff' main block
+           foldl (\m, (k, v) => do m; emit coff doff' k v)
+                 (pure ())
+                 (toList (map fst blks'))
 
 runCompile : X86 () -> Either CompilerError (List Bits8, List Bits8)
 runCompile m =
-  case runState (runEitherT m) empty of
-    (Left error, _) => Left error
-    (Right    _, s) =>
-      let main = mainfn s
-          blks = blocks s
-      in case lookup main blks of
-        Nothing          => Left NoMainFunction
-        Just (mainBlock, len) => let blks = delete main blks in
-          Right (concatMap toBs8 (reverse mainBlock), dataBs s)
+  let m' = preCompile m
+  in case runState (runEitherT m') empty of
+    (Left error, s) => Left error
+    (Right    a, s) => Right (codeBs s, dataBs s)
 
           -- is = instrs s
           -- sz = cast $ 0x600000 + 232 + (length $ concatMap toBs8 is)

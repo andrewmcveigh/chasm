@@ -3,30 +3,18 @@ module Prim
 import Control.Monad.State
 import Data.Bits
 import Data.SortedMap
+import Debug.Trace
 import Syntax
+
+%default total
 
 %access public export
 
 %hide Ptr
 %hide Prelude.Stream.(::)
 
-data TExpr
-  = TSym (Symbol,  TType)
-  | TApp (TExpr,   TType) (TExpr, TType)
-  | TLam (Symbol,  TType) (TExpr, TType)
-  | TLet (Symbol,  TType) (TExpr, TType) (TExpr, TType)
-  | TLit (Literal, TType)
-  | TIf  (TExpr,   TType) (TExpr, TType) (TExpr, TType)
-
 (>>) : Monad m => m a -> m b -> m b
 (>>) ma mb = ma >>= \_ => mb
-
-szt : TType -> Nat
-szt (TCon "Int") = 64
-szt (TArr a b)   = szt a + szt b
-
-sz : TExpr -> Nat
-sz (TSym (_, t)) = szt t
 
 NULL : Integer
 NULL = 0x600000
@@ -34,142 +22,206 @@ NULL = 0x600000
 data R64 = Rax | Rcx | Rdx | Rbx | Rsp | Rbp | Rsi | Rdi
          | R8  | R9  | R10 | R11 | R12 | R13 | R14 | R15
 
-data Val = I Int -- literal integer
-         | R R64 -- register
-         | D R64 -- deref register
-         | A Int -- memory address
-         | P Int -- pointer to memory, subject to adjustment
-         | F String -- function lookup -> pointer to memory
-
-data Ptr = Relative Int | Absolute Int | Local Int
-
-r64index : R64 -> Integer
-r64index r = case r of
+idx : R64 -> Integer
+idx r = case r of
   Rax => 0;  Rcx => 1;  Rdx => 2;  Rbx => 3;
   Rsp => 4;  Rbp => 5;  Rsi => 6;  Rdi => 7
   R8  => 8;  R9  => 9;  R10 => 10; R11 => 11;
   R12 => 12; R13 => 13; R14 => 14; R15 => 15
 
-rax : Val; rax = R Rax; r8  : Val; r8  = R R8
-rcx : Val; rcx = R Rcx; r9  : Val; r9  = R R9
-rdx : Val; rdx = R Rdx; r10 : Val; r10 = R R10
-rbx : Val; rbx = R Rbx; r11 : Val; r11 = R R11
-rsp : Val; rsp = R Rsp; r12 : Val; r12 = R R12
-rbp : Val; rbp = R Rbp; r13 : Val; r13 = R R13
-rsi : Val; rsi = R Rsi; r14 : Val; r14 = R R14
-rdi : Val; rdi = R Rdi; r15 : Val; r15 = R R15
+data Pt  = Code Int | Data Int
 
-regToReg : Bits8 -> R64 -> R64 -> List Bits8
-regToReg op rx ry =
-  let ix = r64index rx
-      iy = r64index ry
-  in if ix < 8 && iy < 8
-     then [0x48, op, fromInteger $ 0xc0 + 8 * ix + iy]
-     else if ix < 8 && iy >= 8
-     then [0x49, op, fromInteger $ 0xc0 + 8 * ix + (iy - 8)]
-     else if ix >= 8 && iy < 8
-     then [0x4c, op, fromInteger $ 0xc0 + 8 * (ix - 8) + iy]
-     else [0x4d, op, fromInteger $ 0xc0 + 8 * (ix - 8) + (iy - 8)]
+data Val = I Int | R  R64 | D  R64 | A  Int | P  Pt
+data R_M =         R' R64 | D' R64 | A' Int | P' Pt
 
-bs : Integer -> Integer -> List Bits8
-bs 8 = reverse . b64ToBytes . fromInteger
-bs 4 = reverse . b32ToBytes . fromInteger
-bs 2 = reverse . b16ToBytes . fromInteger
-bs 1 = reverse . b8ToBytes  . fromInteger
+data Ptr = Loc Bits8 | Rel Int | Abs Int
+data Fp  = FRef String | MRel Int
+
+R64.rax : R64; R64.rax = Rax; R64.r8  : R64; R64.r8  = R8
+R64.rcx : R64; R64.rcx = Rcx; R64.r9  : R64; R64.r9  = R9
+R64.rdx : R64; R64.rdx = Rdx; R64.r10 : R64; R64.r10 = R10
+R64.rbx : R64; R64.rbx = Rbx; R64.r11 : R64; R64.r11 = R11
+R64.rsp : R64; R64.rsp = Rsp; R64.r12 : R64; R64.r12 = R12
+R64.rbp : R64; R64.rbp = Rbp; R64.r13 : R64; R64.r13 = R13
+R64.rsi : R64; R64.rsi = Rsi; R64.r14 : R64; R64.r14 = R14
+R64.rdi : R64; R64.rdi = Rdi; R64.r15 : R64; R64.r15 = R15
+
+Val.rax : Val; Val.rax = R Rax; Val.r8  : Val; Val.r8  = R R8
+Val.rcx : Val; Val.rcx = R Rcx; Val.r9  : Val; Val.r9  = R R9
+Val.rdx : Val; Val.rdx = R Rdx; Val.r10 : Val; Val.r10 = R R10
+Val.rbx : Val; Val.rbx = R Rbx; Val.r11 : Val; Val.r11 = R R11
+Val.rsp : Val; Val.rsp = R Rsp; Val.r12 : Val; Val.r12 = R R12
+Val.rbp : Val; Val.rbp = R Rbp; Val.r13 : Val; Val.r13 = R R13
+Val.rsi : Val; Val.rsi = R Rsi; Val.r14 : Val; Val.r14 = R R14
+Val.rdi : Val; Val.rdi = R Rdi; Val.r15 : Val; Val.r15 = R R15
+
+R_M.rax : R_M; R_M.rax = R' Rax; R_M.r8  : R_M; R_M.r8  = R' R8
+R_M.rcx : R_M; R_M.rcx = R' Rcx; R_M.r9  : R_M; R_M.r9  = R' R9
+R_M.rdx : R_M; R_M.rdx = R' Rdx; R_M.r10 : R_M; R_M.r10 = R' R10
+R_M.rbx : R_M; R_M.rbx = R' Rbx; R_M.r11 : R_M; R_M.r11 = R' R11
+R_M.rsp : R_M; R_M.rsp = R' Rsp; R_M.r12 : R_M; R_M.r12 = R' R12
+R_M.rbp : R_M; R_M.rbp = R' Rbp; R_M.r13 : R_M; R_M.r13 = R' R13
+R_M.rsi : R_M; R_M.rsi = R' Rsi; R_M.r14 : R_M; R_M.r14 = R' R14
+R_M.rdi : R_M; R_M.rdi = R' Rdi; R_M.r15 : R_M; R_M.r15 = R' R15
+
+R_M._rax : R_M; R_M._rax = D' Rax; R_M._r8  : R_M; R_M._r8  = D' R8
+R_M._rcx : R_M; R_M._rcx = D' Rcx; R_M._r9  : R_M; R_M._r9  = D' R9
+R_M._rdx : R_M; R_M._rdx = D' Rdx; R_M._r10 : R_M; R_M._r10 = D' R10
+R_M._rbx : R_M; R_M._rbx = D' Rbx; R_M._r11 : R_M; R_M._r11 = D' R11
+R_M._rsp : R_M; R_M._rsp = D' Rsp; R_M._r12 : R_M; R_M._r12 = D' R12
+R_M._rbp : R_M; R_M._rbp = D' Rbp; R_M._r13 : R_M; R_M._r13 = D' R13
+R_M._rsi : R_M; R_M._rsi = D' Rsi; R_M._r14 : R_M; R_M._r14 = D' R14
+R_M._rdi : R_M; R_M._rdi = D' Rdi; R_M._r15 : R_M; R_M._r15 = D' R15
+
+bs : Integer -> Int -> List Bits8
+bs 8 = reverse . b64ToBytes . fromInteger . cast
+bs 4 = reverse . b32ToBytes . fromInteger . cast
+bs 2 = reverse . b16ToBytes . fromInteger . cast
+bs 1 = reverse . b8ToBytes  . fromInteger . cast
 bs _ = assert_unreachable
 
 opcode : R64 -> Bits8
-opcode = fromInteger . r64index
+opcode = fromInteger . idx
 
-toReg : Bits8 -> List Bits8 -> R64 -> List Bits8
-toReg op val reg =
-  let i = r64index reg
-  in if i < 8
-     then [0x48, op, fromInteger (0xc0 + i)] ++ val
-     else [0x49, op, fromInteger (0xc0 + i - 8)] ++ val
+grid8x8 : Bits8 -> Bits8 -> Integer -> Integer -> Integer -> List Bits8
+grid8x8 pfx op start x y = [pfx, op, fromInteger $ start + 8 * x + y]
 
-derefReg : Integer -> R64 -> List Bits8
-derefReg op reg =
-  let i   = r64index reg
-  in if i < 8
-     then [fromInteger (op + i)]
-     else [0x41, fromInteger (op + (i - 8))]
+reginst : Bits8 -> Bits8 -> Integer -> Integer -> Integer -> List Bits8
+reginst pfx op start src dst =
+  let (pfx' , src') = if src < 8 then (pfx , src) else (pfx  + 4, src - 8)
+      (pfx'', dst') = if dst < 8 then (pfx', dst) else (pfx' + 1, dst - 8)
+  in grid8x8 pfx'' op start src' dst'
 
-regToMem : R64 -> Integer -> List Bits8
-regToMem r ptr =
-  let r' = (0xc0 + (r64index r))
-  in if r' < 8
-     then 0x48 :: 0x4b :: fromInteger (0x04 + (8 * r')) :: 0x25 :: bs 8 ptr
-     else 0x4c :: 0x4b :: fromInteger (0x04 + (8 * (r' - 8))) :: 0x25 :: bs 8 ptr
+regins1 : Bits8 -> Bits8 -> Integer -> Integer -> List Bits8
+regins1 pfx op start reg =
+  let (pfx' , reg') = if reg < 8 then (pfx , reg) else (pfx  + 1, reg - 8)
+  in grid8x8 pfx' op start 0 reg'
 
-data Instr = Mov  Val Val
+data Instr = Mov  Val   R_M
+           | Add  Val   R64
+           | Sub  Val   R64
+           | Test Val   R_M
+           -- | Shl  Bits8 R_M
            | Push Val
-           | Pop  Val
-           | Ret -- [0xc3]
-           | Ker -- [0xcd 0x80]
-           | Lit  Integer
-           | Add  Val Val
-           | Sub  Val Val
-           | Div  Val
-           | Test Val Val -- eq?
-           | Shl  Val Val -- Jump if (last result was) zero
-           | Inc  Val     -- Decrement register
-           | Dec  Val     -- Decrement register
-           | Jmp  Ptr     -- Jump to ptr
-           | Jz   Ptr     -- Jump if (last result was) zero
-           | Jnz  Ptr     -- Jump if (last result was) zero
-           | SJz  Val     -- short relative 1 byte 2s complement forward/back
-           | NJz  Val     -- near relative? 4 byte ?
-           | AJz  Val     -- absolute indirect 4 byte address
-           | Call Val
+           | Pop  R_M
+           | Lit  Int
+           | Div  R_M
+           | Inc  R_M       -- Decrement register
+           | Dec  R_M       -- Decrement register
+           | Jmp  Ptr       -- Jump to ptr
+           | Jz   Ptr       -- Jump if (last result was) zero
+           | Jnz  Ptr       -- Jump if (last result was) zero
+           | Call Fp        -- "call" a function in the env
+           | Ret            -- return & pop
+           | Ker            -- call kernel [0xcd 0x80]
 
-toBs8 : Instr -> List Bits8
-toBs8 (Mov (R src) (R dst)) = regToReg 0x89 src dst
-toBs8 (Mov (I val) (R dst)) = toReg 0xc7 (bs 4 (cast val)) dst
-toBs8 (Mov (P _  ) (R _  )) = [0, 0, 0, 0, 0, 0, 0]
-toBs8 (Mov (R src) (A dst)) = regToMem src (cast dst)
-toBs8 (Mov (A src) (R dst)) = toReg 0xc7 (bs 4 (cast src)) dst
-toBs8 (Add (R src) (R dst)) = regToReg 0x01 src dst
-toBs8 (Sub (R src) (R dst)) = regToReg 0x29 src dst
-toBs8 (Div (R src))         = let op = opcode src
-                              in if op < 8
-                                 then [0x48, 0xf7, 0xf0 + op]
-                                 else [0x49, 0xf7, 0xf0 + op]
-toBs8 (Test (I val) (R Rax)) = [0x48, 0xa9] ++ (bs 4 (cast val))
-toBs8 (Test (I val) (R reg)) = let op = opcode reg
-                               in if op < 8
-                                  then [0x48, 0xf7, 0xc0 + op] ++ (bs 4 (cast val))
-                                  else [0x49, 0xf7, 0xc0 + op] ++ (bs 4 (cast val))
-toBs8 (SJz (I x)) = [0xf4, fromInteger (cast x)]
-toBs8 (SJz     _) = assert_unreachable
--- toBs8 (RJeq (A a)) = [0x74, (bs 1 (cast a))]
-toBs8 (AJz (A a)) = [0xff, 0x25] ++ (bs 4 (cast a))
-toBs8 (AJz  _) = assert_unreachable
+literal : Bits8 -> Integer -> Int -> R64 -> List Bits8
+literal op start val dst = reginst 0x48 op start 0 (idx dst) ++ bs 4 val
 
--- all cases done?
-toBs8 (Push (R r)) = derefReg 0x50 r
-toBs8 (Pop  (R r)) = derefReg 0x58 r
+address : Bits8 -> Integer -> Int -> R64 -> List Bits8
+address op start add dst = reginst 0x48 op start (idx dst) 0 ++ 0x25 :: bs 4 add
 
--- toBs8 (Jmp  (R r)) =
---   let i   = r64index r
---   in if i < 8
---      then [0xff, fromInteger (0xe0 + i)]
---      else [0x41, 0xff, fromInteger (0xe0 + (i - 8))]
+registr : Bits8 -> Integer -> R64 -> R64 -> List Bits8
+registr op start src dst = reginst 0x48 op start (idx src) (idx dst)
 
--- toBs8 (Jmp  (A a)) = 0xff :: 0x25 :: bs 8 (cast a)
+regist1 : Bits8 -> Integer -> R64 -> List Bits8
+regist1 op start reg = regins1 0x48 op start (idx reg)
 
-toBs8 (Lit val) = bs 8 val
+single1 : Bits8 -> (l : List Integer) -> {auto ok : NonEmpty l} -> R64 -> List Bits8
+single1 pfx op reg =
+  let i     = idx reg
+      start = last op
+      butl  = init op
+  in if i < 8
+     then map fromInteger (butl ++ [start + i])
+     else pfx :: map fromInteger (butl ++ [start + i - 8])
 
-toBs8 Ret = [0xc3]
-toBs8 Ker = [0xcd, 0x80]
+codegen : Instr -> List Bits8
 
--- toBs8 (Add (I val) (R Rax)) = 0x48 :: 0x05 :: (bs 8 (cast val)) -- up to 32bit
--- toBs8 (Add (I val) (R dst)) = toReg 0x81 (bs 8 (cast val)) dst  -- up to 32bit
-toBs8 _ = []
+codegen (Mov  (I val) (R' dst)) = literal 0xc7 0xc0 val dst
+codegen (Mov  (R src) (R' dst)) = registr 0x89 0xc0 src dst
+codegen (Mov  (D src) (R' dst)) = registr 0x8b 0x00 src dst
+codegen (Mov  (A src) (R' dst)) = address 0x8b 0x04 src dst
+codegen (Mov  (I val) (D' dst)) = literal 0xc7 0x00 val dst
+codegen (Mov  (R src) (D' dst)) = registr 0x89 0x00 src dst
+codegen (Mov  (I val) (A' dst)) = [0x48, 0xc7, 0x04, 0x25] ++ bs 4 dst ++ bs 4 val
+codegen (Mov  (R src) (A' dst)) = reginst 0x48 0x89 0x04 (idx src) 0 ++ 0x25 :: bs 4 dst
+-- this is the asm generated for ^^ 49 c7 c0 29 01 60 00 # mov 0x00600129 r8
+-- which is very similar to literal rule
+codegen (Mov  (I val) (P' dst)) = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+codegen (Mov  (R src) (P' dst)) = [0, 0, 0, 0, 0, 0, 0, 0]
+codegen (Mov  (P _  ) (R' _  )) = [0, 0, 0, 0, 0, 0, 0, 0]
+codegen (Mov  _       _       ) = assert_unreachable
 
-||| Max byte size of an instruction is 17 bytes. More accuracy can be added per
-||| instruction type and operand type.
-instrSize : Instr -> Int
-instrSize Ret = 1
-instrSize Ker = 2
-instrSize _ = 17
+codegen (Add  (I val)     dst ) = literal 0x81 0xc0 val dst
+codegen (Add  (R src)     dst ) = registr 0x01 0xc0 src dst
+codegen (Add  (D src)     dst ) = registr 0x03 0x00 src dst
+codegen (Add  (A src)     dst ) = address 0x03 0x04 src dst
+codegen (Add  (P _  )     _   ) = [0, 0, 0, 0, 0, 0, 0, 0]
+
+codegen (Sub  (I val)     dst ) = literal 0x81 0xe8 val dst
+codegen (Sub  (R src)     dst ) = registr 0x29 0xc0 src dst
+codegen (Sub  (D src)     dst ) = registr 0x2b 0x00 src dst
+codegen (Sub  (A src)     dst ) = address 0x2b 0x04 src dst
+codegen (Sub  (P _  )     _   ) = [0, 0, 0, 0, 0, 0, 0, 0]
+
+codegen (Test (I val) (R' dst)) = literal 0xf7 0xc0 val dst
+codegen (Test (R src) (R' dst)) = registr 0x85 0xc0 src dst
+codegen (Test (D src) (R' dst)) = registr 0x85 0x00 src dst
+codegen (Test (A src) (R' dst)) = address 0x85 0x04 src dst
+codegen (Test (I val) (D' dst)) = literal 0xf7 0x00 val dst
+codegen (Test (R src) (D' dst)) = registr 0x85 0x00 src dst
+codegen (Test (I val) (A' dst)) = [0x48, 0xf7, 0x04, 0x25] ++ bs 4 dst ++ bs 4 val
+codegen (Test (R src) (A' dst)) = reginst 0x48 0x85 0x04 (idx src) 0 ++ 0x25 :: bs 4 dst
+codegen (Test (I _  ) (P' _  )) = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+codegen (Test (R _  ) (P' _  )) = [0, 0, 0, 0, 0, 0, 0, 0]
+codegen (Test (P _  ) (R' _  )) = [0, 0, 0, 0, 0, 0, 0, 0]
+codegen (Test _       _       ) = assert_unreachable
+
+codegen (Push (I  val)) = 0x68 :: bs 4 val
+codegen (Push (R  reg)) = single1 0x41 [0x50] reg
+codegen (Push (D  reg)) = single1 0x41 [0xff, 0x50] reg
+codegen (Push (A  add)) = [0xff, 0x34, 0x25] ++ bs 4 add
+codegen (Push (P  _  )) = [0, 0, 0, 0, 0, 0, 0]
+
+codegen (Pop  (R' reg)) = single1 0x41 [0x58] reg
+codegen (Pop  (D' reg)) = single1 0x41 [0x8f, 0x00] reg
+codegen (Pop  (A' add)) = [0x8f, 0x04, 0x25] ++ bs 4 add
+codegen (Pop  (P' _  )) = [0, 0, 0, 0, 0, 0, 0]
+
+codegen (Div  (R' reg)) = regist1 0xf7 0xf0 reg
+codegen (Div  (D' Rsp)) = [0x48, 0xf7, 0x34, 0x24]
+codegen (Div  (D' reg)) = regist1 0xf7 0x30 reg
+codegen (Div  (A' add)) = [0x48, 0xf7, 0x34, 0x25] ++ bs 4 add
+codegen (Div  (P' _  )) = [0, 0, 0, 0, 0, 0, 0]
+
+codegen (Inc  (R' reg)) = regist1 0xff 0xc0 reg
+codegen (Inc  (D' Rsp)) = [0x48, 0xff, 0x04, 0x24]
+codegen (Inc  (D' reg)) = regist1 0xff 0x00 reg
+codegen (Inc  (A' add)) = [0x48, 0xff, 0x04, 0x25] ++ bs 4 add
+codegen (Inc  (P' _  )) = [0, 0, 0, 0, 0, 0, 0]
+
+codegen (Dec  (R' reg)) = regist1 0xff 0xc8 reg
+codegen (Dec  (D' Rsp)) = [0x48, 0xff, 0x0c, 0x24]
+codegen (Dec  (D' reg)) = regist1 0xff 0x08 reg
+codegen (Dec  (A' add)) = [0x48, 0xff, 0x0c, 0x25] ++ bs 4 add
+codegen (Dec  (P' _  )) = [0, 0, 0, 0, 0, 0, 0]
+
+codegen (Jmp  (Loc b )) = [0xeb, b]
+codegen (Jmp  (Rel i )) = 0xe9 :: bs 4 i
+codegen (Jmp  (Abs i )) = 0xff :: 0x25 :: bs 4 i
+
+codegen (Jz   (Loc b )) = [0x74, b]
+codegen (Jz   (Rel i )) = 0x0f :: 0x84 :: bs 4 i
+codegen (Jz   (Abs i )) = assert_unreachable
+
+codegen (Jnz  (Loc b )) = [0x75, b]
+codegen (Jnz  (Rel i )) = 0x0f :: 0x84 :: bs 4 i
+codegen (Jnz  (Abs i )) = assert_unreachable
+
+codegen (Call (FRef s)) = [0, 0, 0, 0, 0]
+codegen (Call (MRel i)) = 0xe8 :: bs 4 i -- TODO: maybe this should only be 2b
+
+codegen (Lit val) = bs 4 val
+codegen Ret       = [0xc3]
+codegen Ker       = [0xcd, 0x80]
