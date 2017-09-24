@@ -205,12 +205,14 @@ interface Adjustable a where
 
 Adjustable Val where
   adjv coff doff (P (Code x)) = A (x + coff)
-  adjv coff doff (P (Data x)) = A (x + doff)
+  adjv coff doff (P (PData x)) = A (x + doff)
+  adjv coff doff (P (IData x)) = I (x + doff)
   adjv _ _ x = x
 
 Adjustable R_M where
   adjv coff doff (P' (Code x)) = A' (x + coff)
-  adjv coff doff (P' (Data x)) = A' (x + doff)
+  adjv coff doff (P' (PData x)) = A' (x + doff)
+  adjv coff doff (P' (IData x)) = assert_unreachable
   adjv _ _ x = x
 
 Adjustable Ptr where
@@ -236,30 +238,29 @@ adj coff doff Ret       = Ret
 adj coff doff Ker       = Ker
 -- adj off (Shl  x y) = Shl  (adjv off x) (adjv off y)
 
-resolve : Instr -> X86 Instr
-resolve (Call (FRef name)) = do
+write : List Bits8 -> X86 ()
+write bytes =
+  modify (\m => record { memOff $= (+ (length bytes))
+                       , codeBs $= (\bs => bs ++ bytes) } m)
+
+emitf : Instr -> X86 ()
+emitf (Call (FRef name)) = do
   Just address <- gets (lookup name . symtab)
-                | Nothing => throwErr (NoFunction name)
-  pure (Call (MRel (cast address))) -- this needs to be relative to this call instruction
-resolve x = pure x
--- trying to resolve something this way, before it exists obviously doesn't work
--- can I use the type system to prevent this? Or will I always need this?
--- Forward refs are probably necessary. If we know the order that we will lay
--- down the bytes, and the sizes, we can pre-compute the offsets.
+               | Nothing => throwErr (NoFunction name)
+  offset <- gets memOff
+  write (codegen (Call (MRel (trace (show (name
+                                          , address
+                                          , offset
+                                          , (cast address) - (5 + (cast offset))))
+                                    ((cast address) - (5 + (cast offset)))))))
+emitf x = write (codegen x)
 
 emit : Nat -> Nat -> String -> List Instr -> X86 ()
-emit coff doff name instrs = do
-  instrs' <- traverse (resolve . adj (cast coff) (cast doff)) instrs
-  let bytes = concatMap codegen (reverse instrs')
-  offset <- gets memOff
-  modify (\m => record { codeBs $= (\bs => bs ++ bytes)
-                       , memOff $= (+ (length bytes))
-                       , symtab $= insert name offset} m)
-
+emit coff doff name instrs =
+  do offset <- gets memOff
+     traverse (emitf . adj (cast coff) (cast doff)) instrs
+     modify (\m => record { symtab $= insert name offset } m)
 -- TODO: calls not relative - call to wrong address
--- TODO: mov int to r8 in hello world wrong - address fn was stepping wrong
--- 49 8b 04 25 42 00 60 00 # mov ? 0x00600042 = 0x00600000 + 66 -- don't work - need the full offset
--- 49 c7 c0 29 01 60 00 # mov 0x00600129 r8 -- does work
 
 Symtab : Type
 Symtab = SortedMap String Nat

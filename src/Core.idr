@@ -99,7 +99,7 @@ p__prn_lit_str s = do
   p <- store $ map fromChar $ unpack s
   let len = (I $ cast $ length s)
   pure $ do mov  len   rdi
-            mov  (P (Data (cast p))) r8 -- TODO: this doesn't work because later
+            mov  (P (IData (cast p))) r8
             call "p__prn" -- we try to deref the pointer, but it's an address
 
 helloWorld : X86 ()

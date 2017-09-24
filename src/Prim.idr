@@ -29,7 +29,7 @@ idx r = case r of
   R8  => 8;  R9  => 9;  R10 => 10; R11 => 11;
   R12 => 12; R13 => 13; R14 => 14; R15 => 15
 
-data Pt  = Code Int | Data Int
+data Pt  = Code Int | PData Int | IData Int
 
 data Val = I Int | R  R64 | D  R64 | A  Int | P  Pt
 data R_M =         R' R64 | D' R64 | A' Int | P' Pt
@@ -146,10 +146,9 @@ codegen (Mov  (I val) (D' dst)) = literal 0xc7 0x00 val dst
 codegen (Mov  (R src) (D' dst)) = registr 0x89 0x00 src dst
 codegen (Mov  (I val) (A' dst)) = [0x48, 0xc7, 0x04, 0x25] ++ bs 4 dst ++ bs 4 val
 codegen (Mov  (R src) (A' dst)) = reginst 0x48 0x89 0x04 (idx src) 0 ++ 0x25 :: bs 4 dst
--- this is the asm generated for ^^ 49 c7 c0 29 01 60 00 # mov 0x00600129 r8
--- which is very similar to literal rule
 codegen (Mov  (I val) (P' dst)) = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 codegen (Mov  (R src) (P' dst)) = [0, 0, 0, 0, 0, 0, 0, 0]
+codegen (Mov  (P (IData _)) (R' _  )) = [0, 0, 0, 0, 0, 0, 0]
 codegen (Mov  (P _  ) (R' _  )) = [0, 0, 0, 0, 0, 0, 0, 0]
 codegen (Mov  _       _       ) = assert_unreachable
 
@@ -220,7 +219,7 @@ codegen (Jnz  (Rel i )) = 0x0f :: 0x84 :: bs 4 i
 codegen (Jnz  (Abs i )) = assert_unreachable
 
 codegen (Call (FRef s)) = [0, 0, 0, 0, 0]
-codegen (Call (MRel i)) = 0xe8 :: bs 4 i -- TODO: maybe this should only be 2b
+codegen (Call (MRel i)) = 0xe8 :: bs 4 i
 
 codegen (Lit val) = bs 4 val
 codegen Ret       = [0xc3]
