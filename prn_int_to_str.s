@@ -1,5 +1,5 @@
 _start:
-    movq $0xffffffffffffffff, %rdi
+    movq $0x4d2, %rdi
     call p__to_str_int64
     call exit
 

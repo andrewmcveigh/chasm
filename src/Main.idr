@@ -7,7 +7,7 @@ import Core
 import Elf
 
 main : IO ()
-main = case runCompile prog of
+main = case runCompile _main of
   Right (codeBs, dataBs) => do
     writeProgram "/tmp/hello2" $ program codeBs dataBs
     pure ()

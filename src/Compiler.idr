@@ -47,9 +47,20 @@ data CompilerError
 X86 : Type -> Type
 X86 = EitherT CompilerError (State Mem)
 
+writeCommit : Instr -> Block
+writeCommit i = modify (\bs => record { instrs $= ((::) i)
+                                      , offset $= (+ (length (codegen i))) } bs )
+
+adjLoc : (Ptr -> Instr) -> Int -> Block
+adjLoc ctor loc =
+    do offset <- gets offset
+       writeCommit (ctor (Loc (loc - cast offset - 2)))
+
 commit : Instr -> Block
-commit i = modify (\bs => record { instrs $= ((::) i)
-                                 , offset $= (+ (length (codegen i))) } bs )
+commit (Jmp (Loc l)) = adjLoc Jmp l
+commit (Jz  (Loc l)) = adjLoc Jz  l
+commit (Jnz (Loc l)) = adjLoc Jnz l
+commit x = writeCommit x
 
 push : Val -> Block; push = commit . Push
 pop  : R_M -> Block; pop  = commit . Pop

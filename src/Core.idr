@@ -55,7 +55,7 @@ p__to_str_int64 =
       push rdx        -- push remainder onto stack
       inc  rcx        -- inc counter
 
-    mov  rcx    rdx -- put counter in rdi
+    mov  rcx    rdi -- put counter in rdi
     allocHeap       -- allocate number of bytes in rdi
     mov  rsi    rbx -- put ptr to allocated string in rbx
     mov  (I  0) rax -- clear rax
@@ -100,7 +100,16 @@ p__prn_lit_str s = do
   let len = (I $ cast $ length s)
   pure $ do mov  len   rdi
             mov  (P (IData (cast p))) r8
-            call "p__prn" -- we try to deref the pointer, but it's an address
+            call "p__prn"
+
+p__prn_lit_int64 : Int -> X86 Block
+p__prn_lit_int64 i = pure $ do
+  mov  (I i) rdi         -- put i in rdi
+  push rbp               -- save heap pointer rbp -> stack
+  call "p__to_str_int64"
+  pop  r8                -- load prev heap pointer into r8
+  call "p__prn"
+  call "p__exit"
 
 helloWorld : X86 ()
 helloWorld = do
@@ -108,6 +117,15 @@ helloWorld = do
   primfn "helloWorld" $ do
     f
     call "p__exit"
+
+_main : X86 ()
+_main = do
+  f <- p__prn_lit_int64 1234
+  primfn "main" f
+  p__to_str_int64
+  p__exit
+  p__prn
+  start "main"
 
 prog : X86 ()
 prog = p__exit >=> p__prn >=> helloWorld >=> start "helloWorld"

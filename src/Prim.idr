@@ -34,7 +34,7 @@ data Pt  = Code Int | PData Int | IData Int
 data Val = I Int | R  R64 | D  R64 | A  Int | P  Pt
 data R_M =         R' R64 | D' R64 | A' Int | P' Pt
 
-data Ptr = Loc Bits8 | Rel Int | Abs Int
+data Ptr = Loc Int | Rel Int | Abs Int
 data Fp  = FRef String | MRel Int
 
 R64.rax : R64; R64.rax = Rax; R64.r8  : R64; R64.r8  = R8
@@ -206,16 +206,16 @@ codegen (Dec  (D' reg)) = regist1 0xff 0x08 reg
 codegen (Dec  (A' add)) = [0x48, 0xff, 0x0c, 0x25] ++ bs 4 add
 codegen (Dec  (P' _  )) = [0, 0, 0, 0, 0, 0, 0]
 
-codegen (Jmp  (Loc b )) = [0xeb, b]
+codegen (Jmp  (Loc b )) = [0xeb, fromInteger (cast b)]
 codegen (Jmp  (Rel i )) = 0xe9 :: bs 4 i
 codegen (Jmp  (Abs i )) = 0xff :: 0x25 :: bs 4 i
 
-codegen (Jz   (Loc b )) = [0x74, b]
+codegen (Jz   (Loc b )) = [0x74, fromInteger (cast b)]
 codegen (Jz   (Rel i )) = 0x0f :: 0x84 :: bs 4 i
 codegen (Jz   (Abs i )) = assert_unreachable
 
-codegen (Jnz  (Loc b )) = [0x75, b]
-codegen (Jnz  (Rel i )) = 0x0f :: 0x84 :: bs 4 i
+codegen (Jnz  (Loc b )) = [0x75, fromInteger (cast b)]
+codegen (Jnz  (Rel i )) = 0x0f :: 0x84 :: bs 4 i -- TODO: this is same as Jz
 codegen (Jnz  (Abs i )) = assert_unreachable
 
 codegen (Call (FRef s)) = [0, 0, 0, 0, 0]
