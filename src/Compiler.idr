@@ -248,11 +248,7 @@ emitf (Call (FRef name)) = do
   Just address <- gets (lookup name . symtab)
                | Nothing => throwErr (NoFunction name)
   offset <- gets memOff
-  write (codegen (Call (MRel (trace (show (name
-                                          , address
-                                          , offset
-                                          , (cast address) - (5 + (cast offset))))
-                                    ((cast address) - (5 + (cast offset)))))))
+  write (codegen (Call (MRel ((cast address) - (5 + (cast offset))))))
 emitf x = write (codegen x)
 
 emit : Nat -> Nat -> String -> List Instr -> X86 ()
@@ -260,7 +256,6 @@ emit coff doff name instrs =
   do offset <- gets memOff
      traverse (emitf . adj (cast coff) (cast doff)) instrs
      modify (\m => record { symtab $= insert name offset } m)
--- TODO: calls not relative - call to wrong address
 
 Symtab : Type
 Symtab = SortedMap String Nat
@@ -297,11 +292,6 @@ runCompile m =
   in case runState (runEitherT m') empty of
     (Left error, s) => Left error
     (Right    a, s) => Right (codeBs s, dataBs s)
-
-          -- is = instrs s
-          -- sz = cast $ 0x600000 + 232 + (length $ concatMap toBs8 is)
-      -- ^^ could just compile once, and record the position of where offsets
-      -- need to be adjusted, then adjust the bytes
 
 primfn : String -> Block -> X86 ()
 primfn name block =
