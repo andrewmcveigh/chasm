@@ -114,6 +114,7 @@ data Instr = Mov  Val   R_M
            | Call Fp        -- "call" a function in the env
            | Ret            -- return & pop
            | Ker            -- call kernel [0xcd 0x80]
+           | Syscall        -- syscall
 
 literal : Bits8 -> Integer -> Int -> R64 -> List Bits8
 literal op start val dst = reginst 0x48 op start 0 (idx dst) ++ bs 4 val
@@ -224,3 +225,4 @@ codegen (Call (MRel i)) = 0xe8 :: bs 4 i
 codegen (Lit val) = bs 4 val
 codegen Ret       = [0xc3]
 codegen Ker       = [0xcd, 0x80]
+codegen Syscall   = [0x0f, 0x05]

@@ -15,18 +15,32 @@ p__add_int64 =
     mov rdi rax
     add r8  rax
 
-p__add_lit_int64 : Int -> Int -> X86 ()
-p__add_lit_int64 x y =
-  primfn "p__add_lit_int64" $ do
-    mov (I x) rdi
-    mov (I y) r8
-    call "p__add_int64"
+p__add_lit_int64 : Int -> Int -> Block
+p__add_lit_int64 x y = do
+  mov (I x) rdi
+  mov (I y) r8
+  call "p__add_int64"
 
--- always keep the current heap offset in Rbp
--- heap starts in data section
-||| Puts current heap pointer in Rsi, 'allocates' no of bytes in int Rdi
-allocHeap : Block
-allocHeap = do mov rbp rsi; add rdi rbp
+sys_brk : Val
+sys_brk = (I 12)
+
+||| Allocates bytes passed in rdi, returns pointer to start of allocated memory
+||| in rax; clobbers rax.
+p__alloc : X86 ()
+p__alloc =
+  primfn "p__alloc" $ do
+    push rcx         -- sav rcx, or it will get clobbered
+    push rdi         -- sav arg rdi
+    mov sys_brk rax  -- sys_brk
+    mov (I 0) rdi    -- xor rdi rdi clear rdi
+    syscall          -- syscall
+    pop rdi          -- restore arg rdi
+    push rax         -- save ptr
+    add rax rdi      -- add ptr to arg rdi = new alloc end
+    mov sys_brk rax  -- sys_brk
+    syscall          -- systall
+    pop rax          -- restore ptr back in rax
+    pop rcx          -- restore rcx
 
 ||| put a number in rdi, returns in rsi how many bytes the number is long
 p__byte_len : X86 ()
@@ -45,8 +59,8 @@ p__byte_len =
 p__to_str_int64 : X86 ()
 p__to_str_int64 =
   primfn "p__to_str_int64" $ do
-    mov  rdi      rax
-    mov  (I   10) rbx
+    mov  rdi      rax -- put arg rdi in rax
+    mov  (I   10) rbx -- put lit 10 in rbx
 
     whileNot (test rax rax) $ do
       mov  (I  0) rdx -- clear rdx
@@ -55,10 +69,12 @@ p__to_str_int64 =
       push rdx        -- push remainder onto stack
       inc  rcx        -- inc counter
 
-    mov  rcx    rdi -- put counter in rdi
-    allocHeap       -- allocate number of bytes in rdi
-    mov  rsi    rbx -- put ptr to allocated string in rbx
-    mov  (I  0) rax -- clear rax
+    mov  rcx   rdi  -- put counter in rdi
+    call "p__alloc" -- allocate number of bytes in rdi
+    mov  rcx   rdi  -- put counter in rdi
+    mov  rax   r8   -- put ptr in r8
+    mov  rax   rbx  -- put ptr to allocated string in rbx
+    mov  (I 0) rax  -- clear rax
 
     whileNot (test rcx rcx) $ do
       pop  rdx         -- get char off stack -> rdx
@@ -102,14 +118,16 @@ p__prn_lit_str s = do
             mov  (P (IData (cast p))) r8
             call "p__prn"
 
+p__prn_int64 : X86 ()
+p__prn_int64 =
+  primfn "p__prn_int64" $ do
+    call "p__to_str_int64"
+    call "p__prn"
+
 p__prn_lit_int64 : Int -> X86 Block
 p__prn_lit_int64 i = pure $ do
   mov  (I i) rdi         -- put i in rdi
-  push rbp               -- save heap pointer rbp -> stack
-  call "p__to_str_int64"
-  pop  r8                -- load prev heap pointer into r8
-  call "p__prn"
-  call "p__exit"
+  call "p__prn_int64"
 
 helloWorld : X86 ()
 helloWorld = do
@@ -120,12 +138,18 @@ helloWorld = do
 
 _main : X86 ()
 _main = do
-  f <- p__prn_lit_int64 1234
-  primfn "main" f
+  primfn "main" $ do
+    p__add_lit_int64 2 2   -- result in rax
+    mov rax rdi            -- pass to call
+    call "p__to_str_int64" -- to_str
+    call "p__prn"
+    call "p__exit"
+  p__alloc
+  p__add_int64
   p__to_str_int64
   p__exit
   p__prn
   start "main"
 
 prog : X86 ()
-prog = p__exit >=> p__prn >=> helloWorld >=> start "helloWorld"
+prog = do p__alloc; p__exit; p__prn; helloWorld; start "helloWorld"

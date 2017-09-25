@@ -80,6 +80,8 @@ jnz  : Ptr -> Block; jnz = commit . Jnz
 ret  : Block; ret = commit Ret
 ker  : Block; ker = commit Ker
 
+syscall : Block; syscall = commit Syscall
+
 ||| Calls the function labeled by a String, the function must have been declared.
 ||| TODO: could we statically check that the function has been declared?
 call : String -> Block
@@ -244,9 +246,10 @@ adj coff doff (Dec  x  ) = Dec  (adjv coff doff x)
 adj coff doff (Jmp  x  ) = Jmp  (adjv coff doff x)
 adj coff doff (Jz   x  ) = Jz   (adjv coff doff x)
 adj coff doff (Jnz  x  ) = Jnz  (adjv coff doff x)
-adj coff doff (Call x  ) = Call x
-adj coff doff Ret       = Ret
-adj coff doff Ker       = Ker
+adj _    _    (Call x  ) = Call x
+adj _    _    Ret       = Ret
+adj _    _    Ker       = Ker
+adj _    _    Syscall   = Syscall
 -- adj off (Shl  x y) = Shl  (adjv off x) (adjv off y)
 
 write : List Bits8 -> X86 ()
