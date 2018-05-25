@@ -332,5 +332,15 @@ whileNot test body =
      test
      jnz here
 
+ifThenElse : Block -> Block -> Block
+ifThenElse test consequent alternative =
+  do test
+     label <- fwd
+     jnz label
+     consequent
+     realize label
+     alternative
+
+
 start : String -> X86 ()
 start name = modify (\m => record { mainfn = name } m)
